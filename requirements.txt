@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""MATE Apex Scalper - XAUUSD Stealth Scalping System
+
+Requirements:
+- Python 3.10+
+- MT5 data feed (for live) or cached .pkl (for backtest)
+- Vantage RAW ECN or equivalent broker (for live deployment)
+
+Usage:
+    Backtest only (local):
+        python mate_scalper_pro.py --quick
+
+    Full backtest:
+        python mate_scalper_pro.py
+
+    Live trading (VPS):
+        python mate_scalper_pro.py --live
+
+Options:
+    --deploy        Deployment mode (continuous trading)
+    --quick         Quick test (5000 bars)
+    --live          Single live cycle
+    --capital N     Starting capital (default: 500)
+    --risk N        Risk percent per trade (default: 1.0)
+    --no-news       Disable news filter
+    --no-stealth    Disable stealth SL/TP
+"""
