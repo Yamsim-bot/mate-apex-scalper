@@ -28,6 +28,19 @@ EAs/
 | `MT5/*.mq5` | `%APPDATA%\MetaQuotes\Terminal\<hash>\MQL5\Experts\` → compile to `.ex5` | same path on VPS, compile with MetaEditor |
 | `cTrader/*.cs` | `Documents\cAlgo\Sources\Robots\<Name>_cBot\<Name>_cBot\` | `C:\Users\Administrator\Documents\cAlgo\Sources\Robots\...`, build `.algo` with `dotnet build -c Release` |
 
+## Current live deployment (Aug 18)
+
+| Terminal | Attached EAs |
+|---|---|
+| **VPS MT5** (Default profile, demo #25518022) | FXYAMS (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) · FXPair (EURUSD+ M5) |
+| **Local MT5** (Euro profile) | FXYAMS ×2 (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) |
+| **cTrader** (VPS, demo #10096835) | 4 cBots built; ScalpXAU `gainz_ft.cbotset` ready (Gainz only)
+
+⚠️ Both MT5 terminals trade the **same demo account** — the identical EA sets on
+both will double-fire. Prefer one venue per account, or keep them split by EA.
+
+See `MT5/ScalpXAU_gainz_config.md` for the exact Gainz inputs deployed to both terminals.
+
 ## Key parameters — ScalpXAU Gainz-Swing (MT5 + cTrader)
 
 - TP 159 pips · SL 322 pips · max hold 11 h
