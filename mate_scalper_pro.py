@@ -58,6 +58,18 @@ class ScalperConfig:
     use_breakeven: bool = True
     be_at_fraction: float = 0.6        # Move to BE at this fraction of TP
 
+    # ─── Trailing Stop ────────────────────────
+    use_trailing_stop: bool = True          # Enable ATR-based trailing stop
+    trail_activation: float = 0.5           # Activate trail after price moves 0.5x ATR in profit
+    trail_distance: float = 0.8             # Trail SL at 0.8x ATR behind best price
+    trail_step: float = 0.15                # Recalculate every 0.15x ATR move (avoid excessive mods)
+
+    # ─── Market Regime Filter ────────────────
+    use_regime_filter: bool = True          # Skip trades in low-vol / ranging markets
+    min_atr_for_trade: float = 3.0          # Minimum M5 ATR to take a trade
+    low_vol_pillars: int = 3                # Require more pillars when vol is low
+    low_vol_adx: float = 25.0               # Require higher ADX in low vol
+
     # ─── News Filter ─────────────────────────
     use_news_filter: bool = True
     news_minutes_before: int = 30      # Pause trading X min before high-impact
@@ -515,6 +527,13 @@ def detect_signal_scalp(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
     if np.isnan(bar['adx']) or bar['adx'] < config.adx_threshold:
         return None
 
+    # ── Market Regime Filter ──────────────────────────────────
+    if config.use_regime_filter:
+        atr_val = bar.get('atr14', 0)
+        if np.isnan(atr_val) or atr_val < config.min_atr_for_trade:
+            return None  # Low volatility — skip, market likely ranging
+    # Note: additional regime checks (pillar/ADX bump) applied below
+
     # Trend bias
     tf_bar = df_trend.reindex(index=df_trend.index[df_trend.index <= ts], method='pad')
     if tf_bar.empty:
@@ -536,6 +555,17 @@ def detect_signal_scalp(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
     in_aov = abs(bar['close'] - (hi48 + lo48) / 2) < 1.5
 
     pillars = sum([cross_bull or cross_bear, impulse, in_aov, bias is not None])
+
+    # Bump pillar/ADX requirements in low-to-moderate volatility
+    if config.use_regime_filter:
+        atr_val = bar.get('atr14', 0)
+        moderate_vol_threshold = config.min_atr_for_trade * 1.5
+        if not np.isnan(atr_val) and atr_val < moderate_vol_threshold:
+            if pillars < config.low_vol_pillars:
+                return None  # Need more confirmation in lower vol
+            if bar['adx'] < config.low_vol_adx:
+                return None  # Need stronger trend in lower vol
+
     if pillars < config.min_pillars:
         return None
 
@@ -642,11 +672,21 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
         tp = trade.take_profit
         partial_tp = levels['partial_price']
         be_active = False
+        trail_active = False
+        trail_trigger_price = sig['entry'] + (sig['atr'] * config.trail_activation) if sig['side'] == 'LONG' else sig['entry'] - (sig['atr'] * config.trail_activation)
+        best_price = sig['entry']  # track best price for trailing
+        last_trail_update = 0.0
         resolved = False
 
         for j in range(i + 1, min(i + 25, len(df_entry))):
             bj = df_entry.iloc[j]
             bj_bar = df_entry.iloc[j]
+
+            # Track best price reached
+            if sig['side'] == 'LONG':
+                best_price = max(best_price, bj['high'])
+            else:
+                best_price = min(best_price, bj['low'])
 
             # Dynamic SL adjustment (re-evaluate ATR regime)
             if trade.sl_adjustments < 5:  # limit adjustments
@@ -657,6 +697,33 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
                                          (trade.side == 'SHORT' and new_sl < sl):
                         sl = new_sl
                         trade.sl_adjustments += 1
+
+            # ── Trailing Stop ────────────────────────────────────
+            if config.use_trailing_stop:
+                # Check if price has moved enough to activate trailing
+                if not trail_active:
+                    if sig['side'] == 'LONG' and bj['high'] >= trail_trigger_price:
+                        trail_active = True
+                        sl = max(sl, best_price - sig['atr'] * config.trail_distance)
+                        last_trail_update = abs(best_price - sig['entry'])
+                    elif sig['side'] == 'SHORT' and bj['low'] <= trail_trigger_price:
+                        trail_active = True
+                        sl = min(sl, best_price + sig['atr'] * config.trail_distance)
+                        last_trail_update = abs(best_price - sig['entry'])
+                # Update trailing SL when price moves another trail_step x ATR
+                if trail_active:
+                    mkt_move = abs(best_price - sig['entry'])
+                    if mkt_move - last_trail_update >= sig['atr'] * config.trail_step:
+                        if sig['side'] == 'LONG':
+                            sl = max(sl, best_price - sig['atr'] * config.trail_distance)
+                            # Never let trailing SL be worse than BE if BE was active
+                            if be_active:
+                                sl = max(sl, trade.entry_price + 0.01)
+                        else:
+                            sl = min(sl, best_price + sig['atr'] * config.trail_distance)
+                            if be_active:
+                                sl = min(sl, trade.entry_price - 0.01)
+                        last_trail_update = mkt_move
 
             if sig['side'] == 'LONG':
                 # Partial TP
@@ -669,14 +736,14 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
                     trade.partial_pnl = partial_pnl
                     trade.broker_costs += partial_cost
                     trade.lots_remaining = half_lots
-                    sl = trade.entry_price + 0.01  # BE on remainder
+                    sl = max(sl, trade.entry_price + 0.01)  # BE on remainder
                     be_active = True
                     continue
 
-                # Breakeven
-                if not be_active and config.use_breakeven:
+                # Breakeven (only if trailing stop hasn't already moved past BE)
+                if not be_active and not trail_active and config.use_breakeven:
                     if bj['high'] >= trade.entry_price + (tp - trade.entry_price) * config.be_at_fraction:
-                        sl = trade.entry_price + 0.01
+                        sl = max(sl, trade.entry_price + 0.01)
                         be_active = True
 
                 if bj['high'] >= tp:
@@ -696,7 +763,12 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
                     trade.broker_costs += final_cost
                     trade.exit_time = df_entry.index[j]
                     trade.exit_price = sl
-                    trade.exit_reason = 'BE' if be_active else 'SL'
+                    if be_active:
+                        trade.exit_reason = 'BE'
+                    elif trail_active:
+                        trade.exit_reason = 'TRAIL'
+                    else:
+                        trade.exit_reason = 'SL'
                     resolved = True
                     break
 
@@ -710,13 +782,13 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
                     trade.partial_pnl = partial_pnl
                     trade.broker_costs += partial_cost
                     trade.lots_remaining = half_lots
-                    sl = trade.entry_price - 0.01
+                    sl = min(sl, trade.entry_price - 0.01)
                     be_active = True
                     continue
 
-                if not be_active and config.use_breakeven:
+                if not be_active and not trail_active and config.use_breakeven:
                     if bj['low'] <= trade.entry_price - abs(tp - trade.entry_price) * config.be_at_fraction:
-                        sl = trade.entry_price - 0.01
+                        sl = min(sl, trade.entry_price - 0.01)
                         be_active = True
 
                 if bj['low'] <= tp:
@@ -736,7 +808,12 @@ def run_scalper_backtest(df_entry: pd.DataFrame, df_trend: pd.DataFrame,
                     trade.broker_costs += final_cost
                     trade.exit_time = df_entry.index[j]
                     trade.exit_price = sl
-                    trade.exit_reason = 'BE' if be_active else 'SL'
+                    if be_active:
+                        trade.exit_reason = 'BE'
+                    elif trail_active:
+                        trade.exit_reason = 'TRAIL'
+                    else:
+                        trade.exit_reason = 'SL'
                     resolved = True
                     break
 
@@ -1115,9 +1192,11 @@ def print_result(r: Result, config: ScalperConfig):
 
     full_tp = sum(1 for t in r.trades if t.exit_reason == 'TP')
     sl = sum(1 for t in r.trades if t.exit_reason in ('SL', 'BE'))
+    trail_exits = sum(1 for t in r.trades if t.exit_reason == 'TRAIL')
     partials = sum(1 for t in r.trades if t.partial_filled)
     print(f"\n  TRADE BREAKDOWN:")
     print(f"    Full TP:     {full_tp} ({full_tp/max(r.total_trades,1)*100:.1f}%)")
+    print(f"    Trailed:     {trail_exits} ({trail_exits/max(r.total_trades,1)*100:.1f}%)")
     print(f"    Partial:     {partials} ({partials/max(r.total_trades,1)*100:.1f}%)")
     print(f"    Stop Loss:   {sl} ({sl/max(r.total_trades,1)*100:.1f}%)")
 

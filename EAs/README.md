@@ -7,57 +7,94 @@ is the version deployed to both terminals (local + VPS).
 
 ```
 EAs/
-├── MT5/                  MetaTrader 5 Expert Advisors (MQL5)
-│   ├── FXPair_EA.mq5
-│   ├── FXRE_Hybrid_EA.mq5
-│   ├── FXYAMS_Ultimate1.mq5
-│   └── ScalpXAU.mq5       (Gainz-Swing mode + legacy Asian/London/NY/Trend)
-└── cTrader/              cTrader cBots (C# / cAlgo)
-    ├── FXPair_cBot.cs
-    ├── FXRE_Hybrid_cBot.cs
-    ├── FXYAMS_Ultimate1_cBot.cs
-    ├── ScalpXAU_cBot.cs   (Gainz-Swing + Telegram trade alerts)
-    ├── gainz_ft.cbotset   (forward-test config: Gainz only, demo #10096835)
-    └── ScalpXAU_tuned.cbotset
+├── MT5/                     MetaTrader 5 Expert Advisors (MQL5)
+│   ├── FXPair_EA.mq5        Confluence day-trader (EURUSD+ M5)
+│   ├── FXRE_Hybrid_EA.mq5   Scalp + S&D hybrid (XAUUSD+ M5)
+│   ├── FXYAMS_Ultimate1.mq5 Structure scalper + trend (XAUUSD+/XAGUSD)
+│   ├── ScalpXAU.mq5         Gold scalper + Gainz-Swing (XAUUSD+)
+│   └── ScalpXAU_gainz_config.md  Exact Gainz chart inputs
+└── cTrader/                 cTrader cBots (C# / cAlgo)
+    ├── FXPair_cBot.cs        Same logic as MT5 FXPair_EA
+    ├── FXRE_Hybrid_cBot.cs   Same logic as MT5 FXRE_Hybrid_EA
+    ├── FXYAMS_Ultimate1_cBot.cs  Same logic as MT5 FXYAMS_Ultimate1
+    ├── ScalpXAU_cBot.cs      Same logic as MT5 ScalpXAU + Telegram alerts
+    ├── gainz_ft.cbotset      Forward-test config (Gainz only, demo #10096835)
+    ├── ScalpXAU_tuned.cbotset
+    └── build/                Compiled .algo files
+        ├── FXPair_cBot.algo
+        ├── FXRE_Hybrid_cBot.algo
+        ├── FXYAMS_Ultimate1_cBot.algo
+        └── ScalpXAU_cBot.algo
 ```
+
+## Workspace layout
+
+```
+Documents/
+├── EAs/                     ★ CANONICAL SOURCES (edit here)
+│   ├── MT5/                 MT5 .mq5 files + config
+│   └── cTrader/             cTrader .cs files + .cbotset + build/
+├── cAlgo/                   cTrader IDE project (auto-synced from EAs/cTrader)
+│   ├── Sources/Robots/      .cs source + .algo project files
+│   └── Data/cBots/          Backtesting parameter sets
+├── cTrader/                 Deployment workspace (scripts + logs)
+│   ├── scripts/             93 deployment/helper scripts (vps_*, ea_*, ft_*)
+│   ├── Journals/            MT5 journal copies
+│   ├── logs/                Keep-alive and report logs
+│   └── lern-deutsch/        German learning website
+└── lern-deutsch/            German website (GitHub repo)
+```
+
+**Rule:** Always edit files in `EAs/MT5/` or `EAs/cTrader/`. The `cAlgo/` project
+directories are synced from there. Never edit `cAlgo/` directly.
 
 ## Deployment mapping
 
 | Source | Local terminal | VPS |
 |---|---|---|
-| `MT5/*.mq5` | `%APPDATA%\MetaQuotes\Terminal\<hash>\MQL5\Experts\` → compile to `.ex5` | same path on VPS, compile with MetaEditor |
-| `cTrader/*.cs` | `Documents\cAlgo\Sources\Robots\<Name>_cBot\<Name>_cBot\` | `C:\Users\Administrator\Documents\cAlgo\Sources\Robots\...`, build `.algo` with `dotnet build -c Release` |
+| `EAs/MT5/*.mq5` | `%APPDATA%\MetaQuotes\Terminal\<hash>\MQL5\Experts\` → compile to `.ex5` | same path on VPS, compile with MetaEditor |
+| `EAs/cTrader/*.cs` | `Documents\cAlgo\Sources\Robots\<Name>_cBot\<Name>_cBot\` | `C:\Users\Administrator\Documents\cAlgo\Sources\Robots\...`, build `.algo` with `dotnet build -c Release` |
 
-## Current live deployment (Aug 18)
+## Current live deployment (Aug 19, dedup'd)
 
-| Terminal | Attached EAs |
-|---|---|
-| **VPS MT5** (Default profile, demo #25518022) | FXYAMS (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) · FXPair (EURUSD+ M5) |
-| **Local MT5** (Euro profile) | FXYAMS ×2 (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) |
-| **cTrader** (VPS, demo #10096835) | 4 cBots built; ScalpXAU `gainz_ft.cbotset` ready (Gainz only)
+| Terminal | Attached EAs | Owns (UTC) |
+|---|---|---|
+| **VPS MT5** (Default profile, demo #25518022) | FXYAMS (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) · FXPair (EURUSD+ M5) | **NY tail 16:00–21:00** (Gainz 14:00–21:00 GMT) |
+| **Local MT5** (Euro profile) | FXYAMS ×2 (XAUUSD+ M5) · FXRE_Hybrid (XAUUSD+ M5) · ScalpXAU **Gainz ON** (XAUUSD+ M5) | **London 07:00–16:00** (Gainz 07:00–14:00 GMT) |
+| **cTrader** (VPS, demo #10096835) | 4 cBots built; ScalpXAU `gainz_ft.cbotset` ready (Gainz only) | CLI regression — needs UI attachment |
 
-⚠️ Both MT5 terminals trade the **same demo account** — the identical EA sets on
-both will double-fire. Prefer one venue per account, or keep them split by EA.
+**Duplicate-position protection:** both terminals trade the same demo account,
+so each EA's entry window is **split by terminal — no overlap** (config-only,
+via session inputs in the saved chart profiles):
 
-See `MT5/ScalpXAU_gainz_config.md` for the exact Gainz inputs deployed to both terminals.
+- **FXYAMS / FXRE_Hybrid**: Local = London 07:00–16:00 UTC, NY disabled; VPS = NY 16:00–21:00 UTC, London disabled.
+- **ScalpXAU Gainz**: Local 07:00–14:00 GMT; VPS 14:00–21:00 GMT.
+- **FXPair** (EURUSD+, VPS only) — no split needed.
+
+Rollback: `.chr` backups in `...\MQL5\Profiles\Charts\<Profile>\_dedup_backup_*`.
 
 ## Key parameters — ScalpXAU Gainz-Swing (MT5 + cTrader)
 
 - TP 159 pips · SL 322 pips · max hold 11 h
 - No overnight: closes before 22:00 GMT cutoff
-- Entry window 07:00–21:00 GMT, EMA200 (H1) trend bias, 3 h cooldown
+- Entry window 07:00–21:00 GMT (split across terminals), EMA200 (H1) trend bias, 3 h cooldown
 - Risk 1% per trade
 - Enable via `EnableGainzSwing=true`; legacy legs (`EnableAsian/London/NY/Trend`) off
 
-## Telegram
+## Telegram reports
 
-Reports (daily + Asian/London/NY sessions) are generated by
-`ea_daily_report.py` on the VPS and delivered through the `@xau_mate_bot`
-("XAU MATE Signals") to chat `457995870`. Multi-destination support:
-edit `TELEGRAM_CHATS` in the script to add a public channel.
+Reports (daily + Asian/London/NY/weekly) generated by `ea_daily_report.py` on
+the VPS, delivered to **XAU MATE Signals** (chat `457995870`). Each report is
+tagged `📱 MT5` or `💻 cTrader`. Scheduled tasks: EA_Asian_Report, EA_London_Report,
+EA_NY_Report, EA_Daily_Report, EA_Weekly_Report.
 
-## Deploy helpers (VPS)
+## Deploy helpers
 
-- `vps_run_ps1.py <file.ps1>` — upload + run a PowerShell script on the VPS
-- `vps_run_py.py <file.py>` — upload + run a Python script on the VPS
-- `ft_status.py` — forward-test status (cTrader demo)
+All deployment scripts live in `cTrader/scripts/`:
+- `vps_run_ps1.py <file.ps1>` — upload + run PowerShell on VPS
+- `vps_run_py.py <file.py>` — upload + run Python on VPS
+- `ea_bleed_audit.py` — P/L audit across EAs
+- `ea_overnight_audit.py` — overnight trade breakdown
+- `ft_status.py` — forward-test status (cTrader)
+- `gainz_backtest.py` — Gainz algo backtester
+- `mt5_keepalive.ps1` — keep-alive watcher (power + MT5 watchdog)

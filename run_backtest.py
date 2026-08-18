@@ -11,6 +11,10 @@ c = ScalperConfig()
 c.adx_threshold = 22; c.min_pillars = 2; c.use_di_filter = True
 c.fib_sl_mult = 0.4; c.fib_tp_mult = 2.0; c.rr_target = 2.0
 c.risk_pct = 1.0; c.use_breakeven = True; c.use_news_filter = False
+c.use_trailing_stop = True
+c.trail_activation = 0.3; c.trail_distance = 1.2; c.trail_step = 0.15
+c.use_regime_filter = True
+c.min_atr_for_trade = 3.0; c.low_vol_pillars = 3; c.low_vol_adx = 25.0
 c.initial_capital = 500.0
 
 print('Running TSL-HRR backtest...')
@@ -32,6 +36,7 @@ avg_loss = abs(sum(x.net_pnl + x.partial_pnl for x in ls) / len(ls))
 sl_t = len([x for x in t if x.exit_reason == 'SL'])
 tp_t = len([x for x in t if x.exit_reason == 'TP'])
 be_t = len([x for x in t if x.exit_reason == 'BE'])
+trail_t = len([x for x in t if x.exit_reason == 'TRAIL'])
 
 print()
 print('='*60)
@@ -56,6 +61,7 @@ print()
 print(f'  EXITS:  SL={sl_t} ({sl_t/len(t)*100:.0f}%)')
 print(f'          TP={tp_t} ({tp_t/len(t)*100:.0f}%)')
 print(f'          BE={be_t} ({be_t/len(t)*100:.0f}%)')
+print(f'          TRAIL={trail_t} ({trail_t/len(t)*100:.0f}%)')
 print()
 
 # Monthly breakdown
