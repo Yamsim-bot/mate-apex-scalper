@@ -10,3 +10,5 @@
 !requirements.txt
 !README.md
 !.gitignore
+!EAs/
+!EAs/**
