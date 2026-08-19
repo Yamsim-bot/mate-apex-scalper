@@ -325,6 +325,82 @@ def _fetch_headlines() -> list[NewsHeadline]:
 
 
 
+FINANCIAL_BULLISH = {
+    # Central bank dovish = bullish for risk assets
+    'dovish': +0.6, 'dovish hold': +0.7, 'dovish pause': +0.7,
+    'rate cut': +0.8, 'rate cuts': +0.8, 'cut rates': +0.8,
+    'easing': +0.6, 'loosening': +0.5, 'accommodative': +0.6,
+    'stimulus': +0.7, 'expansionary': +0.5,
+    'lower rates': +0.7, 'lower interest rates': +0.7,
+    'hold steady': +0.2, 'on hold': +0.1, 'steady': +0.1,  # neutral-positive
+    # Economic strength = bullish for currency
+    'growth': +0.4, 'gdp beat': +0.6, 'gdp surprise': +0.6,
+    'expansion': +0.5, 'rebound': +0.5, 'recovery': +0.5,
+    'boom': +0.6, 'surge': +0.5, 'rally': +0.6, 'breakout': +0.6,
+    # Employment
+    'jobs growth': +0.5, 'payrolls beat': +0.6, 'unemployment falls': +0.5,
+    'claims fall': +0.4, 'hiring': +0.4, 'wage growth': +0.4,
+    # Market momentum
+    'all-time high': +0.6, 'record high': +0.6, 'new high': +0.4,
+    'bullish': +0.7, 'bull market': +0.7, 'bull run': +0.6,
+    'outperform': +0.5, 'upgrade': +0.4, 'buy signal': +0.6,
+    'positive': +0.3, 'strong': +0.3, 'higher': +0.3,
+    'upside': +0.5, 'momentum': +0.3,
+    # Commodities
+    'supply crunch': +0.4, 'supply tight': +0.4,
+    'production cut': +0.5, 'output cut': +0.4,
+    # Specific instruments
+    'risk on': +0.5, 'risk-on': +0.5,
+    # Earnings
+    'beat earnings': +0.5, 'profit beat': +0.5, 'revenue beat': +0.4,
+    # Gold specific
+    'safe haven': +0.5, 'flight to safety': +0.5,
+    # Technical
+    'golden cross': +0.5, 'breakout above': +0.5,
+}
+
+
+FINANCIAL_BEARISH = {
+    # Central bank hawkish = bearish for risk assets
+    'hawkish': -0.6, 'hawkish hold': -0.7, 'hawkish pause': -0.7,
+    'rate hike': -0.8, 'rate hikes': -0.8, 'hike rates': -0.8,
+    'tightening': -0.6, 'tighten': -0.5,
+    'higher rates': -0.7, 'higher interest rates': -0.7,
+    # Inflation
+    'inflation': -0.4, 'inflation rises': -0.6, 'inflation ticks up': -0.6,
+    'inflation sticky': -0.5, 'sticky inflation': -0.5,
+    'cpi beat': -0.5, 'cpi surprise up': -0.6,
+    # Economic weakness = bearish
+    'recession': -0.8, 'recession fears': -0.8, 'recessionary': -0.7,
+    'contraction': -0.6, 'slowdown': -0.5, 'slump': -0.5,
+    'decline': -0.4, 'downside': -0.5, 'stagnation': -0.5,
+    # Employment
+    'jobs miss': -0.5, 'payrolls miss': -0.6, 'unemployment rises': -0.5,
+    'claims spike': -0.4, 'layoffs': -0.5, 'firing': -0.4,
+    'wage stagnation': -0.4,
+    # Market weakness
+    'bearish': -0.7, 'bear market': -0.7, 'bear run': -0.6,
+    'crash': -0.9, 'plunge': -0.7, 'tumble': -0.6, 'slide': -0.4,
+    'sell-off': -0.6, 'selloff': -0.6, 'dump': -0.5,
+    'correction': -0.5, 'downgrade': -0.5, 'underperform': -0.5,
+    'sell signal': -0.6, 'resistance': -0.2,
+    'negative': -0.3, 'weak': -0.3, 'lower': -0.3,
+    'worst': -0.4, 'loss': -0.4, 'drop': -0.4, 'fall': -0.3,
+    'downside risk': -0.6,
+    # Geopolitical / risk-off
+    'risk off': -0.5, 'risk-off': -0.5, 'uncertainty': -0.4,
+    'geopolitical': -0.4, 'tensions': -0.4, 'sanctions': -0.5,
+    'trade war': -0.6, 'tariffs': -0.5, 'default': -0.7,
+    'bankrupt': -0.8, 'insolvent': -0.7, 'bailout': -0.5,
+    # Energy
+    'demand concerns': -0.4, 'demand weak': -0.4, 'oversupply': -0.5,
+    'supply glut': -0.5,
+    # Technical
+    'death cross': -0.6, 'breakdown': -0.5, 'break below': -0.4,
+    'cap upside': -0.3, 'resistance holds': -0.3,
+}
+
+
 def _financial_sentiment(text: str) -> float:
     """Score a headline using the financial-market lexicon."""
     text_lower = text.lower()
