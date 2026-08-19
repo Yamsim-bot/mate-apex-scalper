@@ -20,6 +20,7 @@
 #include <Trade/AccountInfo.mqh>
 #include "FixedRangeVolumeProfile.mqh"
 #include "PriceActionPatterns.mqh"
+#include "SupportResistance.mqh"
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -76,6 +77,15 @@ input double   Min_SL_ATR         = 1.0;
 input int      MagicNumber        = 241107;
 input string   CommentPrefix      = "SCALPX_EA";
 
+//--- Support & Resistance
+input string   Inp_SR             = "===== S/R SETTINGS ======";
+input bool     EnableSR           = true;           // Use S/R confluence
+input double   SR_ZoneATR         = 0.5;            // S/R zone thickness (xATR)
+input int      SR_SwingLen        = 2;              // Swing bars each side
+input double   SR_ScoreSupport    = 2;              // Confluence score: at support
+input double   SR_ScoreResistance = 2;              // Confluence score: at resistance
+input double   SR_ScoreMTF        = 1;              // Extra score: multi-TF confirmation
+
 //--- Session Times in GMT
 input string   Inp_Time           = "====== SESSION GMT TIMES ====";
 input int      Asian_StartH       = 0;
@@ -100,6 +110,9 @@ CAccountInfo   m_account;
 
 //--- FRVP state
 FRVPState      g_frvp;
+
+//--- S/R state
+SRState        g_sr;
 
 //--- Indicators
 int            hMAFast = INVALID_HANDLE;
@@ -179,6 +192,10 @@ int OnInit()
    g_frvp.current.valid = false;
    g_frvpRefreshCounter = FRVP_RefreshBars; // force first compute
 
+   //--- Initialize S/R
+   g_sr.lastScan = 0;
+   g_sr.current.valid = false;
+
    //--- Initialize stats
    g_stats.startingBalance = m_account.Balance();
    g_stats.tradeCount = 0;
@@ -250,6 +267,15 @@ void OnTick()
          g_frvpRefreshCounter = 0;
          if(RefreshFRVP())
             FRVP_PrintProfile(g_frvp.current, _Symbol);
+      }
+
+      //--- Refresh S/R every 12 bars (~3h on M15)
+      if(EnableSR && g_frvpRefreshCounter % 2 == 0)
+      {
+         if(SR_Scan(g_sr, _Symbol, EntryTF, PERIOD_M15, g_atrValue, SR_ZoneATR, SR_SwingLen))
+         {
+            if(DebugMode) SR_PrintLevels(g_sr.current, _Symbol);
+         }
       }
 
       Print("NEWBAR | Sess=", GetSessionName(GetCurrentSession()),
@@ -398,34 +424,45 @@ void CheckAsianEntry(int trendDir)
                                     PA_MinWickATR, PA_WickBodyRatio,
                                     PA_MinBodyATR, PA_MinMoveATR);
 
-   //--- BUY: price at VAL + bullish PA + not in downtrend
+   //--- BUY: price at VAL + bullish PA + not in downtrend + support nearby
    if(pa.direction == +1)
    {
       bool atVAL = FRVP_AtVAL(prof, bid, zoneTol);
       bool atLVN = FRVP_NearLVN(prof, bid, zoneTol) >= 0;
       bool trendOk = (!PA_RequireTrend || trendDir >= 0);
-
-      //--- Also check proximity to Asian low or VAL
+      bool atSupp = EnableSR ? SR_AtSupport(g_sr.current, bid, zoneTol) : true;
       bool atAsianLow = MathAbs(bid - g_asianLow) <= zoneTol;
 
-      if((atVAL || atLVN || atAsianLow) && trendOk)
+      if((atVAL || atLVN || atSupp || atAsianLow) && trendOk)
       {
-         ExecuteTrade(ORDER_TYPE_BUY, bid, atr, "ASIAN", pa.patternName);
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
+         {
+            srSL = SR_NearestSupportBelow(g_sr.current, bid);
+            srTP = SR_NearestResistanceAbove(g_sr.current, bid);
+         }
+         ExecuteTrade(ORDER_TYPE_BUY, bid, atr, "ASIAN", pa.patternName, srSL, srTP);
       }
    }
 
-   //--- SELL: price at VAH + bearish PA + not in uptrend
+   //--- SELL: price at VAH + bearish PA + not in uptrend + resistance nearby
    if(pa.direction == -1)
    {
       bool atVAH = FRVP_AtVAH(prof, ask, zoneTol);
       bool atLVN = FRVP_NearLVN(prof, ask, zoneTol) >= 0;
       bool trendOk = (!PA_RequireTrend || trendDir <= 0);
-
+      bool atRes = EnableSR ? SR_AtResistance(g_sr.current, ask, zoneTol) : true;
       bool atAsianHigh = MathAbs(ask - g_asianHigh) <= zoneTol;
 
-      if((atVAH || atLVN || atAsianHigh) && trendOk)
+      if((atVAH || atLVN || atRes || atAsianHigh) && trendOk)
       {
-         ExecuteTrade(ORDER_TYPE_SELL, ask, atr, "ASIAN", pa.patternName);
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
+         {
+            srSL = SR_NearestSupportAbove(g_sr.current, ask);
+            srTP = SR_NearestResistanceBelow(g_sr.current, ask);
+         }
+         ExecuteTrade(ORDER_TYPE_SELL, ask, atr, "ASIAN", pa.patternName, srSL, srTP);
       }
    }
 }
@@ -486,7 +523,13 @@ void CheckLondonEntry(int trendDir)
 
             if(frvpConfirm && trendOk)
             {
-               ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "LONDON", pa.patternName);
+               double srSL = 0, srTP = 0;
+               if(EnableSR && g_sr.current.valid)
+               {
+                  srSL = SR_NearestSupportBelow(g_sr.current, bid);
+                  srTP = SR_NearestResistanceAbove(g_sr.current, bid);
+               }
+               ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "LONDON", pa.patternName, srSL, srTP);
                return;
             }
          }
@@ -503,7 +546,13 @@ void CheckLondonEntry(int trendDir)
 
             if(frvpConfirm && trendOk)
             {
-               ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "LONDON", pa.patternName);
+               double srSL = 0, srTP = 0;
+               if(EnableSR && g_sr.current.valid)
+               {
+                  srSL = SR_NearestSupportAbove(g_sr.current, ask);
+                  srTP = SR_NearestResistanceBelow(g_sr.current, ask);
+               }
+               ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "LONDON", pa.patternName, srSL, srTP);
                return;
             }
          }
@@ -563,7 +612,13 @@ void CheckNYEntry(int trendDir)
 
       if((atPOC || atVAL || pa.direction == +1) && trendOk)
       {
-         ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY", "Sweep_BULL+" + (atPOC ? "POC" : atVAL ? "VAL" : pa.patternName));
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
+         {
+            srSL = SR_NearestSupportBelow(g_sr.current, bid);
+            srTP = SR_NearestResistanceAbove(g_sr.current, bid);
+         }
+         ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY", "Sweep_BULL+" + (atPOC ? "POC" : atVAL ? "VAL" : pa.patternName), srSL, srTP);
          return;
       }
    }
@@ -578,7 +633,13 @@ void CheckNYEntry(int trendDir)
 
       if((atPOC || atVAH || pa.direction == -1) && trendOk)
       {
-         ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY", "Sweep_BEAR+" + (atPOC ? "POC" : atVAH ? "VAH" : pa.patternName));
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
+         {
+            srSL = SR_NearestSupportAbove(g_sr.current, ask);
+            srTP = SR_NearestResistanceBelow(g_sr.current, ask);
+         }
+         ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY", "Sweep_BEAR+" + (atPOC ? "POC" : atVAH ? "VAH" : pa.patternName), srSL, srTP);
          return;
       }
    }
@@ -591,24 +652,44 @@ void CheckNYEntry(int trendDir)
 
    if(pa.strength >= 3) // at least medium-strength PA
    {
-      if(pa.direction == +1 && FRVP_AtPOC(prof, bid, zoneTol))
+      if(pa.direction == +1 && (FRVP_AtPOC(prof, bid, zoneTol) || SR_AtSupport(g_sr.current, bid, zoneTol)))
       {
          bool trendOk = (!PA_RequireTrend || trendDir >= 0);
-         if(trendOk) ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY_POC", pa.patternName);
+         if(trendOk)
+         {
+            double srSL = 0, srTP = 0;
+            if(EnableSR && g_sr.current.valid)
+            {
+               srSL = SR_NearestSupportBelow(g_sr.current, bid);
+               srTP = SR_NearestResistanceAbove(g_sr.current, bid);
+            }
+            ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY_POC", pa.patternName, srSL, srTP);
+         }
       }
-      else if(pa.direction == -1 && FRVP_AtPOC(prof, ask, zoneTol))
+      else if(pa.direction == -1 && (FRVP_AtPOC(prof, ask, zoneTol) || SR_AtResistance(g_sr.current, ask, zoneTol)))
       {
          bool trendOk = (!PA_RequireTrend || trendDir <= 0);
-         if(trendOk) ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY_POC", pa.patternName);
+         if(trendOk)
+         {
+            double srSL = 0, srTP = 0;
+            if(EnableSR && g_sr.current.valid)
+            {
+               srSL = SR_NearestSupportAbove(g_sr.current, ask);
+               srTP = SR_NearestResistanceBelow(g_sr.current, ask);
+            }
+            ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY_POC", pa.patternName, srSL, srTP);
+         }
       }
    }
 }
 
 //+------------------------------------------------------------------+
 //| Execute a trade with risk-based sizing                           |
+//| srSL/srTP = S/R-derived levels (0 = use ATR-based defaults)      |
 //+------------------------------------------------------------------+
 void ExecuteTrade(int orderType, double entryPrice, double atr,
-                  string sessionTag, string paTag)
+                  string sessionTag, string paTag,
+                  double srSL = 0, double srTP = 0)
 {
    if(atr <= 0) return;
 
@@ -617,8 +698,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
    double slDist = atr * Min_SL_ATR;
    if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
 
-   //--- TP: use FRVP zone as target
-   double tpDist = atr * 2.0; // default 2x ATR
+   double tpDist = atr * 2.0;
    FRVPResult &prof = g_frvp.current;
 
    if(orderType == ORDER_TYPE_BUY)
@@ -626,20 +706,40 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
       double sl = entryPrice - slDist;
       double tp = entryPrice + tpDist;
 
-      //--- TP target: nearest FRVP zone above entry
-      double nearestZone = prof.vah; // default: VAH
-      if(prof.poc > entryPrice + slDist * 1.5)
-         nearestZone = prof.poc; // POC is closer than VAH
-      if(nearestZone > entryPrice + slDist * 0.5 && nearestZone < entryPrice + atr * 4.0)
-         tp = nearestZone;
+      //--- S/R SL: place below nearest support
+      if(srSL > 0 && srSL < entryPrice)
+      {
+         double srDist = entryPrice - srSL;
+         if(srDist >= Min_SL_ATR * atr && srDist <= atr * 3.0)
+            sl = srSL - atr * 0.2; // buffer below support
+      }
+
+      //--- S/R TP: target nearest resistance above
+      if(srTP > 0 && srTP > entryPrice)
+      {
+         double srTDDist = srTP - entryPrice;
+         if(srTDDist >= slDist * 1.2 && srTDDist <= atr * 5.0)
+            tp = srTP;
+      }
+
+      //--- Fallback: FRVP zone as TP
+      if(tp == entryPrice + tpDist && prof.valid)
+      {
+         double nearestZone = prof.vah;
+         if(prof.poc > entryPrice + slDist * 1.5)
+            nearestZone = prof.poc;
+         if(nearestZone > entryPrice + slDist * 0.5 && nearestZone < entryPrice + atr * 4.0)
+            tp = nearestZone;
+      }
 
       //--- Ensure min 1.5:1 RR
+      slDist = entryPrice - sl;
       if(tp - entryPrice < slDist * 1.5) tp = entryPrice + slDist * 1.5;
 
       sl = NormalizeDouble(sl, digits);
       tp = NormalizeDouble(tp, digits);
 
-      double lot = CalcLotSizeRisk(slDist, RiskPerTradePct);
+      double lot = CalcLotSizeRisk(entryPrice - sl, RiskPerTradePct);
       if(lot <= 0) return;
 
       if(VerifyTrade(ORDER_TYPE_BUY, entryPrice, sl, tp, lot))
@@ -653,7 +753,9 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
                   " price=", DoubleToString(entryPrice, digits),
                   " SL=", DoubleToString(sl, digits),
                   " TP=", DoubleToString(tp, digits),
-                  " POC=", DoubleToString(prof.poc, digits));
+                  " POC=", DoubleToString(prof.poc, digits),
+                  " SR_SL=", DoubleToString(srSL, digits),
+                  " SR_TP=", DoubleToString(srTP, digits));
          }
       }
    }
@@ -662,19 +764,39 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
       double sl = entryPrice + slDist;
       double tp = entryPrice - tpDist;
 
-      //--- TP target: nearest FRVP zone below entry
-      double nearestZone = prof.val;
-      if(prof.poc < entryPrice - slDist * 1.5)
-         nearestZone = prof.poc;
-      if(nearestZone < entryPrice - slDist * 0.5 && nearestZone > entryPrice - atr * 4.0)
-         tp = nearestZone;
+      //--- S/R SL: place above nearest resistance
+      if(srSL > 0 && srSL > entryPrice)
+      {
+         double srDist = srSL - entryPrice;
+         if(srDist >= Min_SL_ATR * atr && srDist <= atr * 3.0)
+            sl = srSL + atr * 0.2; // buffer above resistance
+      }
 
+      //--- S/R TP: target nearest support below
+      if(srTP > 0 && srTP < entryPrice)
+      {
+         double srTDDist = entryPrice - srTP;
+         if(srTDDist >= slDist * 1.2 && srTDDist <= atr * 5.0)
+            tp = srTP;
+      }
+
+      //--- Fallback: FRVP zone as TP
+      if(tp == entryPrice - tpDist && prof.valid)
+      {
+         double nearestZone = prof.val;
+         if(prof.poc < entryPrice - slDist * 1.5)
+            nearestZone = prof.poc;
+         if(nearestZone < entryPrice - slDist * 0.5 && nearestZone > entryPrice - atr * 4.0)
+            tp = nearestZone;
+      }
+
+      slDist = sl - entryPrice;
       if(entryPrice - tp < slDist * 1.5) tp = entryPrice - slDist * 1.5;
 
       sl = NormalizeDouble(sl, digits);
       tp = NormalizeDouble(tp, digits);
 
-      double lot = CalcLotSizeRisk(slDist, RiskPerTradePct);
+      double lot = CalcLotSizeRisk(sl - entryPrice, RiskPerTradePct);
       if(lot <= 0) return;
 
       if(VerifyTrade(ORDER_TYPE_SELL, entryPrice, sl, tp, lot))
@@ -1137,6 +1259,18 @@ void UpdateComment()
    else
    {
       info += "FRVP: computing...\n";
+   }
+
+   //--- S/R info
+   if(EnableSR && g_sr.current.valid)
+   {
+      info += "S/R: S=" + IntegerToString(g_sr.current.supportCount);
+      info += " R=" + IntegerToString(g_sr.current.resistanceCount);
+      if(g_sr.current.supportCount > 0)
+         info += " nearestS=" + DoubleToString(g_sr.current.supports[0].price, 2);
+      if(g_sr.current.resistanceCount > 0)
+         info += " nearestR=" + DoubleToString(g_sr.current.resistances[0].price, 2);
+      info += "\n";
    }
 
    info += "ATR(14): " + DoubleToString(g_atrValue, 1) + "\n";
