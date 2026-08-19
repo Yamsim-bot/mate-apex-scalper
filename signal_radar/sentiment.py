@@ -207,11 +207,24 @@ def _fetch_forexfactory_headlines() -> list[NewsHeadline]:
     headlines = []
     try:
         import feedparser
+        import urllib.request
         import socket
+        
+        # Use proper headers to avoid Cloudflare 403
+        req = urllib.request.Request(
+            'https://www.forexfactory.com/rss.php',
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept': 'application/rss+xml,application/xml,text/xml,*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        )
         old_to = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(8)
+        socket.setdefaulttimeout(10)
         try:
-            feed = feedparser.parse('https://www.forexfactory.com/rss.php')
+            response = urllib.request.urlopen(req, timeout=10)
+            xml_data = response.read().decode('utf-8')
+            feed = feedparser.parse(xml_data)
         finally:
             socket.setdefaulttimeout(old_to)
         for entry in feed.entries[:20]:

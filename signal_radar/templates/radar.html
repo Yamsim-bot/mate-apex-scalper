@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -687,7 +687,7 @@ body {
       <span class="nav-icon">📓</span> Trading Journal
     </button>
     <button class="nav-item" data-tab="news">
-      <span class="nav-icon">📰</span> News / Calendar
+      <span class="nav-icon">📰</span> FF News / Calendar
       <span class="nav-badge" id="news-badge">•</span>
     </button>
     <button class="nav-item" data-tab="chat">
@@ -912,7 +912,7 @@ body {
         <!-- Latest Stories (compact) -->
         <div class="glass-panel" style="padding:0;overflow:hidden">
           <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--bg-card);border-bottom:1px solid var(--border)">
-            <span style="font-size:11px;font-weight:600;color:var(--text)">📰 Latest News</span>
+            <span style="font-size:11px;font-weight:600;color:var(--text)">📰 ForexFactory News</span>
             <span style="font-size:10px;color:var(--text-muted)" id="ff-news-count">0 stories</span>
             <span style="font-size:9px;color:var(--text-muted);margin-left:auto" id="ff-news-updated"></span>
             <button onclick="loadNews()" style="background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--text-dim);font-size:10px;padding:1px 6px;cursor:pointer;margin-left:4px" title="Refresh news">⟳</button>
@@ -950,14 +950,14 @@ body {
               <a href="https://www.investing.com/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">Investing.com</a>
               <a href="https://finviz.com/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">Finviz</a>
             </div>
-            <div style="font-size:10px;color:var(--accent-light);font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">🛢️ Energy & Commodities</div>
+            <div style="font-size:10px;color:var(--accent-light);font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">🛢️ Energy &amp; Commodities</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-bottom:8px">
               <a href="https://www.opec.org/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">OPEC</a>
               <a href="https://www.cmegroup.com/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">CME Group</a>
               <a href="https://www.eia.gov/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">EIA (Oil)</a>
               <a href="https://www.gold.org/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">World Gold Council</a>
             </div>
-            <div style="font-size:10px;color:var(--accent-light);font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">🏦 Central Banks & Policy</div>
+            <div style="font-size:10px;color:var(--accent-light);font-weight:700;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">🏦 Central Banks &amp; Policy</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px">
               <a href="https://www.federalreserve.gov/newsevents.htm" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">Federal Reserve</a>
               <a href="https://www.ecb.europa.eu/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">ECB</a>
@@ -965,7 +965,14 @@ body {
               <a href="https://www.bankofengland.co.uk/" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent-light);text-decoration:none;padding:2px 4px;border-radius:3px;background:var(--bg)">Bank of England</a>
             </div>
           </div>
-        </div><!-- ════ TAB 3: TRADE COACH ════ -->
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ════ TAB 3: TRADE COACH ════ -->
   <div id="tab-chat" class="tab-content">
     <div class="coach-layout">
       <!-- Left sidebar: MATE Reference -->
@@ -2482,7 +2489,7 @@ async function loadFFNews() {
         const pub = h.published ? new Date(h.published.replace('Z', '+00:00')) : null;
         const timeStr = pub ? pub.toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
         const commentCount = Math.floor(Math.random() * 5);
-        const ffUrl = h.url || 'https://www.forexfactory.com/'; return `<div class="ff-news-item" onclick="window.open('${ffUrl}','_blank')">
+        return `<div class="ff-news-item" onclick="window.open('https://www.google.com/search?q=${encodeURIComponent(h.title)}','_blank')">
           <div class="ff-news-title">${h.title}</div>
           <div class="ff-news-meta">
             <span class="ff-news-source">@${h.source}</span>
@@ -2531,7 +2538,7 @@ async function loadFFNews() {
     }
 
   } catch (e) {
-    document.getElementById('ff-news-stream').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red);font-size:12px">ForexFactory news unavailable - check connection</div>';
+    document.getElementById('ff-news-stream').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red);font-size:12px">News unavailable</div>';
   }
 }
 
@@ -3539,4 +3546,3 @@ populateSymbolDropdown();
 </script>
 </body>
 </html>
-
