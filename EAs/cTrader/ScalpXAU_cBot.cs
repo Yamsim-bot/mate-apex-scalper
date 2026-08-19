@@ -236,6 +236,48 @@ namespace cAlgo.Robots
         [Parameter("Gainz Cooldown (hours)", DefaultValue = 3, MinValue = 0)]
         public int Gainz_CooldownHours { get; set; }
 
+        // --- FRVP Settings ---
+        [Parameter("Enable FRVP", DefaultValue = true)]
+        public bool EnableFRVP { get; set; }
+
+        [Parameter("FRVP Anchors (bars)", DefaultValue = 48, MinValue = 10)]
+        public int FRVP_Anchors { get; set; }
+
+        [Parameter("FRVP Bucket (pips)", DefaultValue = 0.5, MinValue = 0.1, Step = 0.1)]
+        public double FRVP_BucketPips { get; set; }
+
+        [Parameter("FRVP Value Area %", DefaultValue = 70.0, MinValue = 50, MaxValue = 90, Step = 5)]
+        public double FRVP_ValueAreaPct { get; set; }
+
+        [Parameter("FRVP Zone Tol (xATR)", DefaultValue = 0.3, MinValue = 0.1, MaxValue = 2.0, Step = 0.1)]
+        public double FRVP_ZoneTolATR { get; set; }
+
+        [Parameter("FRVP Refresh (bars)", DefaultValue = 6, MinValue = 1)]
+        public int FRVP_RefreshBars { get; set; }
+
+        [Parameter("PA Trend Filter", DefaultValue = true)]
+        public bool PA_RequireTrend { get; set; }
+
+        // --- Support & Resistance ---
+        [Parameter("Enable S/R", DefaultValue = true)]
+        public bool EnableSR { get; set; }
+
+        [Parameter("S/R Zone Tol (xATR)", DefaultValue = 0.5, MinValue = 0.1, MaxValue = 2.0, Step = 0.1)]
+        public double SR_ZoneATR { get; set; }
+
+        [Parameter("S/R Swing Length", DefaultValue = 2, MinValue = 1, MaxValue = 5)]
+        public int SR_SwingLen { get; set; }
+
+        // --- Price Action ---
+        [Parameter("PA Min Wick (xATR)", DefaultValue = 0.5, MinValue = 0.1, Step = 0.1)]
+        public double PA_MinWickATR { get; set; }
+
+        [Parameter("PA Wick/Body Ratio", DefaultValue = 2.0, MinValue = 1.0, Step = 0.5)]
+        public double PA_WickBodyRatio { get; set; }
+
+        [Parameter("PA Min Body (xATR)", DefaultValue = 0.15, MinValue = 0.05, Step = 0.05)]
+        public double PA_MinBodyATR { get; set; }
+
         // --- Telegram Alerts (trade notifications) ---
         [Parameter("Telegram Alerts", DefaultValue = true)]
         public bool EnableTelegramAlerts { get; set; }
@@ -318,6 +360,12 @@ namespace cAlgo.Robots
         private DateTime _lastBarTime = DateTime.MinValue;
         private DateTime _lastEntryBarTime = DateTime.MinValue;
         private DateTime _lastTrendEntryBarTime = DateTime.MinValue;
+        
+        // --- FRVP + S/R State ---
+        private FixedRangeVolumeProfile _frvp;
+        private int _frvpRefreshCounter;
+        private SupportResistance _sr;
+
         private int _tickCount = 0;
 
         // ═══════════════════════════════════════════════════════════
@@ -342,6 +390,11 @@ namespace cAlgo.Robots
 
             UpdateSwingPoints();
             Print("ScalpXAU cBot initialized on ", Symbol.Name, " ", EntryTF);
+
+            _frvp = new FixedRangeVolumeProfile();
+            _frvpRefreshCounter = FRVP_RefreshBars;
+            _sr = new SupportResistance(this);
+            Print("FRVP + S/R initialized. Anchors=", FRVP_Anchors, " Bucket=", FRVP_BucketPips, " S/R=", SR_ZoneATR, "xATR");
             Print("Magic: ", MagicNumber, " | Risk: ", RiskPerTradePct, "% per trade, max ", MaxDailyRiskPct, "% daily");
             Print("Trend leg: ", EnableTrend ? "ON" : "OFF",
                   " MA", Trend_MA_Fast, "/", Trend_MA_Slow,
