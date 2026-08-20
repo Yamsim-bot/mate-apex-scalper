@@ -357,6 +357,7 @@ namespace cAlgo.Robots
 
         private readonly DailyStats _stats = new DailyStats();
         private double _atrValue = 0;
+        private PASignal _lastPASignal = new PASignal();
         private DateTime _lastBarTime = DateTime.MinValue;
         private DateTime _lastEntryBarTime = DateTime.MinValue;
         private DateTime _lastTrendEntryBarTime = DateTime.MinValue;
@@ -466,6 +467,50 @@ namespace cAlgo.Robots
             {
                 UpdateSwingPoints();
                 DetectSessionLevels();
+
+                // --- FRVP: compute on new bar (every FRVP_RefreshBars bars)
+                if (EnableFRVP)
+                {
+                    _frvpRefreshCounter++;
+                    if (_frvpRefreshCounter >= FRVP_RefreshBars)
+                    {
+                        _frvpRefreshCounter = 0;
+                        var frvpBars = MarketData.GetBars(EntryTF, Symbol.Name);
+                        if (frvpBars != null && frvpBars.Count >= FRVP_Anchors)
+                        {
+                            if (_frvp.Compute(frvpBars, FRVP_Anchors, FRVP_BucketPips, FRVP_ValueAreaPct))
+                            {
+                                if (DebugMode)
+                                    Print("FRVP | POC=", _frvp.Current.POC.ToString("F2"),
+                                          " VAH=", _frvp.Current.VAH.ToString("F2"),
+                                          " VAL=", _frvp.Current.VAL.ToString("F2"),
+                                          " Zones=", _frvp.Current.Zones.Count);
+                            }
+                        }
+                    }
+                }
+
+                // --- S/R: scan on new bar (every 2 FRVP refresh cycles ≈ 12 bars / ~3h on M15)
+                if (EnableSR && _frvpRefreshCounter % 2 == 0)
+                {
+                    if (_sr.Scan(Symbol.Name, EntryTF, TimeFrame.Minute15, _atrValue, SR_ZoneATR, SR_SwingLen))
+                    {
+                        if (DebugMode)
+                        {
+                            int supCount = _sr.Current.Supports.Count;
+                            int resCount = _sr.Current.Resistances.Count;
+                            Print("S/R | Supports=", supCount, " Resistances=", resCount);
+                        }
+                    }
+                }
+
+                // --- Price Action: detect on new bar
+                _lastPASignal = PriceActionPatterns.Aggregate(_entryBars, 3, _atrValue,
+                    PA_MinWickATR, PA_WickBodyRatio, PA_MinBodyATR);
+                if (_lastPASignal.Direction != 0 && DebugMode)
+                    Print("PA | ", _lastPASignal.Pattern, " Dir=", _lastPASignal.Direction,
+                          " Str=", _lastPASignal.Strength);
+
                 if (EnableGainzSwing) UpdateGainzLevels();
                 Print("NEWBAR | Sess=", GetSessionName(GetCurrentSession()),
                       " GMT=", GetGMTHour(), ":", GetGMTMin().ToString("D2"),
@@ -473,7 +518,9 @@ namespace cAlgo.Robots
                       " Range=", (_asianRangeReady ? "Y" : "N"),
                       " FVG=", _fvgList.Count,
                       " Liq=", _liqLevels.Count,
-                      " Swings=", _swingHighVal.Count, "H ", _swingLowVal.Count, "L");
+                      " Swings=", _swingHighVal.Count, "H ", _swingLowVal.Count, "L",
+                      " FRVP=", (_frvp.Current.Valid ? _frvp.Current.POC.ToString("F0") : "N/A"),
+                      " SR=", _sr.Current.Supports.Count, "S/", _sr.Current.Resistances.Count, "R");
             }
 
             // --- Heartbeat every 100 ticks
@@ -705,6 +752,111 @@ namespace cAlgo.Robots
         private double Oclose(int i) { return _entryBars.ClosePrices[_entryBars.Count - 1 - i]; }
         private DateTime Otime(int i) { return _entryBars.OpenTimes[_entryBars.Count - 1 - i]; }
 
+        // --- FRVP zone proximity check ---
+        private bool NearFRVPZone(double price, double atr, out FRVPZone nearest)
+        {
+            nearest = null;
+            if (!EnableFRVP || !_frvp.Current.Valid) return false;
+            double tol = atr * FRVP_ZoneTolATR;
+            double bestDist = double.MaxValue;
+            foreach (var z in _frvp.Current.Zones)
+            {
+                double dist = Math.Abs(price - z.Price);
+                if (dist <= tol && dist < bestDist)
+                {
+                    bestDist = dist;
+                    nearest = z;
+                }
+            }
+            return nearest != null;
+        }
+
+        // --- S/R level proximity check ---
+        private bool NearSRLevel(double price, double atr, bool isBuy,
+            out SRLevel nearestSupport, out SRLevel nearestResistance)
+        {
+            nearestSupport = null;
+            nearestResistance = null;
+            if (!EnableSR || !_sr.Current.Valid) return false;
+            double tol = atr * SR_ZoneATR;
+
+            // Find nearest support below price
+            double bestSupDist = double.MaxValue;
+            foreach (var s in _sr.Current.Supports)
+            {
+                if (s.Price <= price)
+                {
+                    double dist = price - s.Price;
+                    if (dist <= tol && dist < bestSupDist)
+                    {
+                        bestSupDist = dist;
+                        nearestSupport = s;
+                    }
+                }
+            }
+
+            // Find nearest resistance above price
+            double bestResDist = double.MaxValue;
+            foreach (var r in _sr.Current.Resistances)
+            {
+                if (r.Price >= price)
+                {
+                    double dist = r.Price - price;
+                    if (dist <= tol && dist < bestResDist)
+                    {
+                        bestResDist = dist;
+                        nearestResistance = r;
+                    }
+                }
+            }
+
+            return (isBuy && nearestSupport != null) || (!isBuy && nearestResistance != null);
+        }
+
+        // --- Get best SL level from S/R ---
+        private double GetSR_SL(double price, bool isBuy, double atr)
+        {
+            if (!EnableSR || !_sr.Current.Valid)
+                return isBuy ? price - atr * 1.5 : price + atr * 1.5;
+
+            if (isBuy)
+            {
+                // SL below nearest support with buffer
+                var sup = _sr.NearestSupportBelow(price);
+                if (sup != null) return sup.Price - atr * 0.3;
+                return price - atr * 1.5;
+            }
+            else
+            {
+                // SL above nearest resistance with buffer
+                var res = _sr.NearestResistanceAbove(price);
+                if (res != null) return res.Price + atr * 0.3;
+                return price + atr * 1.5;
+            }
+        }
+
+        // --- Get best TP from S/R ---
+        private double GetSR_TP(double price, bool isBuy, double atr, double minRR)
+        {
+            double minTP = price + (isBuy ? 1 : -1) * atr * minRR;
+
+            if (!EnableSR || !_sr.Current.Valid)
+                return minTP;
+
+            if (isBuy)
+            {
+                var res = _sr.NearestResistanceAbove(price);
+                if (res != null && res.Price > minTP) return res.Price;
+                return minTP;
+            }
+            else
+            {
+                var sup = _sr.NearestSupportAbove(price);
+                if (sup != null && sup.Price < minTP) return sup.Price;
+                return minTP;
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════
         //  ASIAN SESSION: Range-bound scalping
         //  S/R zones on M15, RSI OB/OS, pin bar/engulfing entry.
@@ -768,7 +920,16 @@ namespace cAlgo.Robots
 
                 if (Math.Abs(high - zoneLevel) <= zoneRange && isBear && rejectionCandle)
                 {
-                    if (rsi1 >= RSI_OB)
+                    // --- FRVP confluence: prefer sell at VAH or POC ---
+                    FRVPZone frvpZone;
+                    bool frvpConfluence = NearFRVPZone(high, atr, out frvpZone);
+                    bool atVAHorPOC = frvpConfluence && (frvpZone.Type == FRVPZoneType.VAH || frvpZone.Type == FRVPZoneType.POC);
+
+                    // --- PA confluence ---
+                    bool paConfluence = (_lastPASignal.Direction == -1 && _lastPASignal.Strength >= 2);
+
+                    // Entry requires RSI OB + (FRVP VAH/POC or PA confirmation)
+                    if (rsi1 >= RSI_OB && (EnableFRVP ? atVAHorPOC : true) && (PA_RequireTrend ? paConfluence : true))
                     {
                         double sl = zoneLevel + Asian_SL_BufferATR * atr;
                         double slDist = Math.Abs(sl - close);
@@ -800,7 +961,16 @@ namespace cAlgo.Robots
 
                 if (Math.Abs(low - zoneLevel) <= zoneRange && isBull && rejectionCandle)
                 {
-                    if (rsi1 <= RSI_OS)
+                    // --- FRVP confluence: prefer buy at VAL or POC ---
+                    FRVPZone frvpZone;
+                    bool frvpConfluence = NearFRVPZone(low, atr, out frvpZone);
+                    bool atVALorPOC = frvpConfluence && (frvpZone.Type == FRVPZoneType.VAL || frvpZone.Type == FRVPZoneType.POC);
+
+                    // --- PA confluence ---
+                    bool paConfluence = (_lastPASignal.Direction == 1 && _lastPASignal.Strength >= 2);
+
+                    // Entry requires RSI OS + (FRVP VAL/POC or PA confirmation)
+                    if (rsi1 <= RSI_OS && (EnableFRVP ? atVALorPOC : true) && (PA_RequireTrend ? paConfluence : true))
                     {
                         double sl = zoneLevel - Asian_SL_BufferATR * atr;
                         double slDist = Math.Abs(close - sl);
@@ -888,10 +1058,15 @@ namespace cAlgo.Robots
                                 retestHit = true;
                                 retestBar = c;
                                 entryPrice = ask;
-                                double slDist = atr * 0.5; // tighter stop for breakout
-                                if (slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-                                retestSL = _asianHigh - slDist;
-                                retestTP = entryPrice + slDist * London_RR;
+                                // --- S/R-aware SL/TP ---
+                                retestSL = GetSR_SL(entryPrice, true, atr);
+                                retestTP = GetSR_TP(entryPrice, true, atr, London_RR);
+                                // Ensure minimum SL distance
+                                if (entryPrice - retestSL < Min_SL_ATR * atr)
+                                    retestSL = entryPrice - Min_SL_ATR * atr;
+                                // FRVP bonus: if near POC, tighten TP to VAH
+                                if (EnableFRVP && _frvp.Current.Valid && Math.Abs(entryPrice - _frvp.Current.POC) < atr * 0.5)
+                                    retestTP = Math.Max(retestTP, _frvp.Current.VAH);
                                 break;
                             }
                         }
@@ -918,10 +1093,15 @@ namespace cAlgo.Robots
                                 retestHit = true;
                                 retestBar = c;
                                 entryPrice = bid;
-                                double slDist = atr * 0.5;
-                                if (slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-                                retestSL = _asianLow + slDist;
-                                retestTP = entryPrice - slDist * London_RR;
+                                // --- S/R-aware SL/TP ---
+                                retestSL = GetSR_SL(entryPrice, false, atr);
+                                retestTP = GetSR_TP(entryPrice, false, atr, London_RR);
+                                // Ensure minimum SL distance
+                                if (retestSL - entryPrice < Min_SL_ATR * atr)
+                                    retestSL = entryPrice + Min_SL_ATR * atr;
+                                // FRVP bonus: if near POC, tighten TP to VAL
+                                if (EnableFRVP && _frvp.Current.Valid && Math.Abs(entryPrice - _frvp.Current.POC) < atr * 0.5)
+                                    retestTP = Math.Min(retestTP, _frvp.Current.VAL);
                                 break;
                             }
                         }
@@ -1933,6 +2113,37 @@ namespace cAlgo.Robots
             info += "FVG: " + _fvgList.Count + " | LiqLevels: " + _liqLevels.Count + "\n";
             info += "ATR(14): " + _atrValue.ToString("F1") + " | Swings: " + _swingHighVal.Count + "H/" + _swingLowVal.Count + "L" + "\n";
             info += "Open: " + CountOpenPositions() + sep;
+
+            // --- FRVP info ---
+            if (EnableFRVP && _frvp.Current.Valid)
+            {
+                info += "FRVP: POC=" + _frvp.Current.POC.ToString("F2")
+                      + " VAH=" + _frvp.Current.VAH.ToString("F2")
+                      + " VAL=" + _frvp.Current.VAL.ToString("F2")
+                      + " Zones=" + _frvp.Current.Zones.Count + "\n";
+            }
+            else if (EnableFRVP)
+            {
+                info += "FRVP: computing...\n";
+            }
+
+            // --- S/R info ---
+            if (EnableSR && _sr.Current.Valid)
+            {
+                info += "S/R: " + _sr.Current.Supports.Count + " supports, "
+                      + _sr.Current.Resistances.Count + " resistances";
+                if (_sr.Current.Supports.Count > 0)
+                    info += " | Sup@" + _sr.Current.Supports[0].Price.ToString("F2")
+                          + " (" + _sr.Current.Supports[0].Touches + "x)";
+                if (_sr.Current.Resistances.Count > 0)
+                    info += " | Res@" + _sr.Current.Resistances[0].Price.ToString("F2")
+                          + " (" + _sr.Current.Resistances[0].Touches + "x)";
+                info += "\n";
+            }
+            else if (EnableSR)
+            {
+                info += "S/R: scanning...\n";
+            }
 
             info += "Asian " + (EnableAsian ? "ON" : "OFF");
             info += " | London " + (EnableLondon ? "ON" : "OFF");
