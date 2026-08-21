@@ -1,122 +1,105 @@
 //+------------------------------------------------------------------+
 //|                                           ScalpXAU.mq5           |
-//|                                      XAUUSD Session Scalper      |
-//|                   Asian: Range | London: Breakout | NY: Sweep     |
+//|                  FRVP + Price Action XAUUSD Scalper v3.0          |
+//|                                                                    |
+//|  Strategy:                                                         |
+//|  - Fixed Range Volume Profile zones (POC/VAH/VAL/HVN/LVN)       |
+//|  - Price Action patterns at FRVP zones (pin, engulf, combo)      |
+//|  - Session gating: Asian range, London breakout, NY sweep         |
+//|  - MA50/200 trend bias for direction filter                      |
+//|  - ATR-based SL + TP with break-even + trailing                  |
 //+------------------------------------------------------------------+
-#property copyright "FXRE"
-#property version   "1.00"
-#property description "XAUUSD Scalper — 3 Session-Specific Strategies"
-#property description "Asian (12:30-3:30 GMT): S/R zones + RSI + pin/engulf"
-#property description "London (7:00-10:00 GMT): Asian breakout + retest"
-#property description "NY (13:30-16:30 GMT): Liq sweep + BOS + reversal"
+#property copyright "FXRE v3.0"
+#property version   "3.00"
+#property description "XAUUSD FRVP + Price Action Scalper"
+#property description "Session-gated entries at Volume Profile zones"
 #property strict
 
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/AccountInfo.mqh>
+#include <FixedRangeVolumeProfile.mqh>
+#include <PriceActionPatterns.mqh>
+#include <SupportResistance.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
 //--- General
-input string   Inp_Gen            = "======== GENERAL ========";   // ─────────
-input double   RiskPerTradePct    = 1.0;                            // Risk per trade (%)
-input double   MaxDailyRiskPct    = 5.0;                            // Max daily risk (%)
-input double   MaxSessDDPct       = 5.0;                            // Max drawdown per session (%)
-input int      MaxTradesPerSess   = 40;                             // Max trades per session
-input int      MaxPositions       = 3;                              // Max concurrent positions
-input int      BrokerGMTOffset    = -99;                             // Broker GMT offset (-99=auto-detect)
-input bool     DebugMode          = false;                          // Debug logging
+input string   Inp_Gen            = "======== GENERAL ========";
+input double   RiskPerTradePct    = 1.0;
+input double   MaxDailyRiskPct    = 5.0;
+input double   MaxSessDDPct       = 5.0;
+input int      MaxTradesPerSess   = 40;
+input int      MaxPositions       = 3;
+input int      BrokerGMTOffset    = -99;
+input bool     DebugMode          = false;
 
 //--- Timeframes
-input string   Inp_TF             = "======= TIMEFRAMES =======";   // ─────────
-input ENUM_TIMEFRAMES EntryTF     = PERIOD_M15;                     // Entry timeframe
-input int      SwingLookback      = 100;                            // Swing lookback bars
+input string   Inp_TF             = "======= TIMEFRAMES =======";
+input ENUM_TIMEFRAMES EntryTF     = PERIOD_M15;
+input ENUM_TIMEFRAMES ProfileTF   = PERIOD_M15;
+input int      SwingLookback      = 100;
 
-//--- Asian Session (Range Scalp)
-input string   Inp_Asian          = "===== ASIAN SESSION ======";   // ─────────
-input bool     EnableAsian        = true;                           // Enable Asian strategy
-input int      Asian_TP_Pips      = 10;                             // TP (pips) — 10-15 recommended
-input double   Asian_SL_BufferATR = 0.4;                            // SL buffer beyond range (xATR)
-input int      RSI_Period         = 14;                             // RSI period
-input double   RSI_OB             = 72.0;                           // RSI overbought (sell)
-input double   RSI_OS             = 28.0;                           // RSI oversold (buy)
+//--- FRVP Settings
+input string   Inp_FRVP           = "===== FRVP SETTINGS ======";
+input int      FRVP_Anchors       = 48;            // FRVP lookback bars (48xM15 = 12h)
+input double   FRVP_BucketPips    = 0.50;           // FRVP bucket size (price units)
+input double   FRVP_ValueAreaPct  = 70.0;           // Value area % (default 70)
+input double   FRVP_HVNThreshold  = 0.70;           // HVN = vol >= 70% of POC
+input double   FRVP_LVNThreshold  = 0.20;           // LVN = vol <= 20% of POC
+input double   FRVP_ZoneTolATR    = 0.30;           // Zone entry tolerance (xATR)
+input int      FRVP_RefreshBars   = 6;              // Recompute every N bars
 
-//--- London Session (Breakout+Retest)
-input string   Inp_London         = "===== LONDON SESSION ======";  // ─────────
-input bool     EnableLondon       = true;                           // Enable London strategy
-input double   London_RR          = 1.5;                            // Risk:Reward (1:2 default)
-input double   London_RiskPct     = 1.0;                            // Risk per trade (%) for London
+//--- Price Action Settings
+input string   Inp_PA             = "===== PRICE ACTION ======";
+input double   PA_MinWickATR      = 0.5;            // Pin bar min wick (xATR)
+input double   PA_WickBodyRatio   = 2.0;            // Pin bar wick/body ratio
+input double   PA_MinBodyATR      = 0.15;           // Engulfing min body (xATR)
+input double   PA_MinMoveATR      = 1.0;            // OB flip min move (xATR)
+input bool     PA_RequireTrend    = true;            // PA must agree with MA trend
 
-//--- NY Session (Liquidity Sweep)
-input string   Inp_NY             = "===== NY SESSION ==========";  // ─────────
-input bool     EnableNY           = true;                           // Enable NY strategy
-input double   NY_RR              = 1.5;                            // Risk:Reward (1:2 default)
-input double   NY_RiskPct         = 1.0;                            // Risk per trade (%) for NY
-input int      SweepLookback      = 50;                             // Bars to look for equal highs/lows
-
-//--- Trend Following Leg (MA50/200 regime, pullback + breakout)
-input string   Inp_Trend          = "===== TREND LEG ============="; // ─────────
-input bool     EnableTrend        = true;                           // Enable trend-following leg
-input int      Trend_MA_Fast      = 50;                             // Trend fast MA period (M15)
-input int      Trend_MA_Slow      = 200;                            // Trend slow MA period (M15)
-input double   Trend_MinSep_ATR   = 0.50;                           // Min |MAfast-MAslow| / ATR (regime gate)
-input bool     Trend_SlopeFilter  = true;                           // Both MAs must slope with trend (kills chop whipsaws)
-input double   Trend_Pullback_ATR = 0.50;                           // Pullback must dip within this of fast MA (xATR)
-input double   Trend_Breakout_ATR = 0.60;                           // Breakout bar clears prior high/low by this (xATR)
-input double   Trend_SL_Buffer_ATR= 0.30;                           // SL beyond pullback-low / breakout-bar low (xATR)
-input double   Trend_TrailStart_ATR = 1.00;                         // Wide trail start after profit (xATR)
-input double   Trend_TrailStep_ATR  = 0.50;                         // Wide trail step (xATR)
-input double   Trend_RiskPct     = 1.0;                             // Risk per trend trade (%)
-
-//--- Gainz-Swing Mode (port of the Gainz Algo V2 EA profile; validated by
-//--- backtest on XAUUSD H1 2020-10 -> 2023-10 in gainz_backtest.py: with
-//--- hard SL, session gating, 11h max hold and no overnight the TP159/SL322
-//--- profile turned +11% on real data vs the real EA's -11% (no stop, swap,
-//--- averaging). NOTE: Gainz pips = point (0.01 for gold), unlike the session
-//--- strategies which use 10-point pips.)
-input string   Inp_Gainz          = "===== GAINZ-SWING =========";  // ─────────
-input bool     EnableGainzSwing   = false;                           // Enable Gainz-Swing mode
-input int      Gainz_TP_Pips      = 159;                             // Gainz TP (point-pips)
-input int      Gainz_SL_Pips      = 322;                             // Gainz SL (point-pips)
-input int      Gainz_MaxHoldHours = 11;                              // Max hold (hours)
-input bool     Gainz_NoOvernight  = true;                            // Close before overnight
-input int      Gainz_CutoffHour   = 22;                              // No-overnight cutoff hour (GMT)
-input int      Gainz_StartH       = 7;                               // Session start (GMT)
-input int      Gainz_EndH         = 21;                              // Session end (GMT)
-input double   Gainz_RiskPct      = 1.0;                             // Risk per trade (%)
-input int      Gainz_EMA_Period   = 200;                             // Trend EMA period (H1)
-input int      Gainz_CooldownHours = 3;                              // Cooldown after exit (hours)
+//--- Trend Filter (MA50/200)
+input string   Inp_Trend          = "===== TREND FILTER ======";
+input bool     EnableTrendFilter  = true;
+input int      Trend_MA_Fast      = 50;
+input int      Trend_MA_Slow      = 200;
 
 //--- Risk Management
-input string   Inp_RM             = "===== RISK MGMT ==========";   // ─────────
-input bool     UseBreakEven       = true;                           // Break-even after profit
-input double   BE_ATR_Mult        = 0.6;                            // Break-even trigger (xATR)
-input bool     UseTrailing        = true;                           // Trailing stop
-input double   TrailStart_ATR     = 0.8;                            // Trailing start (xATR)
-input double   TrailStep_ATR      = 0.3;                            // Trailing step (xATR)
-input int      MaxSlippagePts     = 30;                             // Max slippage (points)
-input double   Min_SL_ATR         = 1.0;                            // Min SL distance (xATR, stops inside noise get clipped)
-input int      MagicNumber        = 241107;                         // Magic number
-input string   CommentPrefix      = "SCALPX_EA";                    // Order comment tag
+input string   Inp_RM             = "===== RISK MGMT ======";
+input bool     UseBreakEven       = true;
+input double   BE_ATR_Mult        = 0.6;
+input bool     UseTrailing        = true;
+input double   TrailStart_ATR     = 0.8;
+input double   TrailStep_ATR      = 0.3;
+input int      MaxSlippagePts     = 30;
+input double   Min_SL_ATR         = 1.0;
+input int      MagicNumber        = 241107;
+input string   CommentPrefix      = "SCALPX_EA";
+
+//--- Support & Resistance
+input string   Inp_SR             = "===== S/R SETTINGS ======";
+input bool     EnableSR           = true;           // Use S/R confluence
+input double   SR_ZoneATR         = 0.5;            // S/R zone thickness (xATR)
+input int      SR_SwingLen        = 2;              // Swing bars each side
+input double   SR_ScoreSupport    = 2;              // Confluence score: at support
+input double   SR_ScoreResistance = 2;              // Confluence score: at resistance
+input double   SR_ScoreMTF        = 1;              // Extra score: multi-TF confirmation
 
 //--- Session Times in GMT
-input string   Inp_Time           = "====== SESSION GMT TIMES ===="; // ─────────
-// Asian: 12:30-3:30 GMT
-input int      Asian_StartH       = 0;                              // Asian start hour (GMT)
-input int      Asian_StartM       = 30;                             // Asian start minute
-input int      Asian_EndH         = 3;                              // Asian end hour (GMT)
-input int      Asian_EndM         = 30;                             // Asian end minute
-// London: 7:00-10:00 GMT
-input int      London_StartH      = 7;                              // London start hour (GMT)
-input int      London_StartM      = 0;                              // London start minute
-input int      London_EndH        = 10;                             // London end hour (GMT)
-input int      London_EndM        = 0;                              // London end minute
-// NY: 13:30-16:30 GMT
-input int      NY_StartH          = 13;                             // NY start hour (GMT)
-input int      NY_StartM          = 30;                             // NY start minute
-input int      NY_EndH            = 16;                             // NY end hour (GMT)
-input int      NY_EndM            = 30;                             // NY end minute
+input string   Inp_Time           = "====== SESSION GMT TIMES ====";
+input int      Asian_StartH       = 0;
+input int      Asian_StartM       = 30;
+input int      Asian_EndH         = 3;
+input int      Asian_EndM         = 30;
+input int      London_StartH      = 7;
+input int      London_StartM      = 0;
+input int      London_EndH        = 10;
+input int      London_EndM        = 0;
+input int      NY_StartH          = 13;
+input int      NY_StartM          = 30;
+input int      NY_EndH            = 16;
+input int      NY_EndM            = 30;
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                          |
@@ -125,30 +108,25 @@ CTrade         m_trade;
 CPositionInfo  m_position;
 CAccountInfo   m_account;
 
+//--- FRVP state
+FRVPState      g_frvp;
+
+//--- S/R state
+SRState        g_sr;
+
 //--- Indicators
-int            hRSI;
 int            hMAFast = INVALID_HANDLE;
 int            hMASlow = INVALID_HANDLE;
-
-//--- Last bar the trend leg filled (1 entry per M15 bar — set AFTER open only)
-datetime       g_trendEntryBarTime = 0;
 
 //--- Session tracking
 enum SessionType { SESS_NONE = -1, SESS_ASIAN = 0, SESS_LONDON = 1, SESS_NY = 2 };
 SessionType    g_currentSession = SESS_NONE;
 
-//--- Asian range (for London breakout)
+//--- Asian range
 double         g_asianHigh = 0;
 double         g_asianLow  = 0;
 datetime       g_asianSessionStart = 0;
 bool           g_asianRangeReady = false;
-
-//--- Swing points
-double         g_swingHighVal[];
-int            g_swingHighIdx[];
-double         g_swingLowVal[];
-int            g_swingLowIdx[];
-bool           g_swingReady = false;
 
 //--- Daily stats
 struct DailyStats
@@ -165,74 +143,33 @@ struct DailyStats
 };
 DailyStats     g_stats;
 
-//--- ATR value
+//--- Misc
 double         g_atrValue = 0;
-
-//--- Last bar time (for new bar detection)
 datetime       g_lastBarTime = 0;
-
-//--- Last bar an entry attempt was made (1 entry attempt per bar —
-//--- stops the per-tick flip-flop loop and the market-close retry storm)
 datetime       g_lastEntryBarTime = 0;
-
-//--- FVG detection buffer
-struct FVG
-{
-   double      upper;
-   double      lower;
-   datetime    time;
-   bool        bullish; // true=bullish FVG (gap up), false=bearish FVG (gap down)
-};
-FVG            g_fvgList[];
-int            g_fvgCount;
-
-//--- Liquidiy levels (equal highs/lows for NY)
-struct LiqLevel
-{
-   double      price;
-   datetime    time;
-   bool        isHigh; // true=high, false=low
-   bool        swept;
-};
-LiqLevel       g_liqLevels[];
-int            g_liqCount;
-
-//--- Heartbeat
 int            g_tickCount = 0;
-
-//--- Trade prefix
 string         g_commentPrefix = "XAU";
+int            g_frvpRefreshCounter = 0;
 
-//--- Gainz-Swing state
-int            hGainzEMA = INVALID_HANDLE;      // H1 EMA trend filter
-ulong          g_gainzTickets[];                // snapshot of open Gainz tickets
-int            g_gainzTicketCount = 0;
-datetime       g_lastGainzEntryBarTime = 0;     // one entry attempt per H1 bar
-datetime       g_gainzNextEntryAllowed = 0;     // cooldown after a Gainz exit
+//--- Broker GMT offset
+int            g_brokerGMTOffset = 0;
 
 //--- Fill mode
 ENUM_ORDER_TYPE_FILLING g_fillMode = ORDER_FILLING_FOK;
 
-//--- Broker GMT offset (auto-detected from TimeTradeServer vs TimeGMT)
-int            g_brokerGMTOffset = 0;
-
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   //--- Symbol check
    if(StringFind(_Symbol, "XAU") < 0 && StringFind(_Symbol, "GOLD") < 0)
-   {
       Print("WARNING: ScalpXAU is designed for XAUUSD. Current symbol: ", _Symbol);
-   }
 
-   //--- Initialize trade
    m_trade.SetExpertMagicNumber(MagicNumber);
    m_trade.SetDeviationInPoints(MaxSlippagePts);
    m_trade.SetAsyncMode(false);
 
-   //--- Detect fill mode WITHOUT placing a real order (fix: no FILL_TEST trade)
+   //--- Fill mode
    g_fillMode = ORDER_FILLING_FOK;
    long filling = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if(filling & SYMBOL_FILLING_FOK)      g_fillMode = ORDER_FILLING_FOK;
@@ -241,15 +178,7 @@ int OnInit()
    m_trade.SetTypeFilling(g_fillMode);
    Print("Fill mode: ", EnumToString(g_fillMode));
 
-   //--- Initialize indicators
-   hRSI = iRSI(_Symbol, EntryTF, RSI_Period, PRICE_CLOSE);
-   if(hRSI == INVALID_HANDLE)
-   {
-      Print("ERROR: Failed to create RSI handle");
-      return INIT_FAILED;
-   }
-
-   //--- Trend-leg MA handles (M15)
+   //--- Trend MA handles
    hMAFast = iMA(_Symbol, EntryTF, Trend_MA_Fast, 0, MODE_SMA, PRICE_CLOSE);
    hMASlow = iMA(_Symbol, EntryTF, Trend_MA_Slow, 0, MODE_SMA, PRICE_CLOSE);
    if(hMAFast == INVALID_HANDLE || hMASlow == INVALID_HANDLE)
@@ -257,26 +186,15 @@ int OnInit()
       Print("ERROR: Failed to create trend MA handles");
       return INIT_FAILED;
    }
-   Print("Trend leg: ", EnableTrend ? "ON" : "OFF",
-         " MA", Trend_MA_Fast, "/", Trend_MA_Slow,
-         " gate sep>=", Trend_MinSep_ATR, "xATR", Trend_SlopeFilter ? " +slope" : "",
-         " | pullback<=", Trend_Pullback_ATR,
-         " breakout>=", Trend_Breakout_ATR, " trail ", Trend_TrailStart_ATR, "/", Trend_TrailStep_ATR, "xATR");
 
-   //--- Gainz-Swing mode init
-   if(EnableGainzSwing)
-   {
-      hGainzEMA = iMA(_Symbol, PERIOD_H1, Gainz_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
-      if(hGainzEMA == INVALID_HANDLE)
-      {
-         Print("ERROR: Failed to create Gainz EMA handle");
-         return INIT_FAILED;
-      }
-      Print("Gainz-Swing: ON | TP=", Gainz_TP_Pips, "p SL=", Gainz_SL_Pips,
-            "p | hold<=", Gainz_MaxHoldHours, "h | no-overnight=", Gainz_NoOvernight ? "ON" : "OFF",
-            " (cutoff ", Gainz_CutoffHour, ":00 GMT) | window ", Gainz_StartH, "-", Gainz_EndH,
-            " GMT | risk ", Gainz_RiskPct, "% | EMA", Gainz_EMA_Period);
-   }
+   //--- Initialize FRVP
+   g_frvp.lastCompute = 0;
+   g_frvp.current.valid = false;
+   g_frvpRefreshCounter = FRVP_RefreshBars; // force first compute
+
+   //--- Initialize S/R
+   g_sr.lastScan = 0;
+   g_sr.current.valid = false;
 
    //--- Initialize stats
    g_stats.startingBalance = m_account.Balance();
@@ -289,39 +207,33 @@ int OnInit()
    g_stats.sessionStartEquity = m_account.Equity();
    g_stats.sessTradingStopped = false;
 
-   //--- Broker GMT offset: auto-detect unless user set a manual value
+   //--- Broker GMT offset
    g_brokerGMTOffset = BrokerGMTOffset;
    if(g_brokerGMTOffset == -99)
    {
       g_brokerGMTOffset = (int)MathRound((TimeTradeServer() - TimeGMT()) / 3600.0);
       if(g_brokerGMTOffset < -14) g_brokerGMTOffset = -14;
       if(g_brokerGMTOffset > 14)  g_brokerGMTOffset = 14;
-      Print("Broker GMT offset: AUTO-DETECTED = +", g_brokerGMTOffset,
-            " (server=", TimeToString(TimeTradeServer()), " GMT=", TimeToString(TimeGMT()), ")");
-   }
-   else
-   {
-      Print("Broker GMT offset: MANUAL = ", g_brokerGMTOffset);
+      Print("Broker GMT offset: AUTO = +", g_brokerGMTOffset);
    }
 
-   //--- Initial swing detection
-   UpdateSwingPoints();
-
-   Print("ScalpXAU initialized on ", _Symbol, " ", EnumToString(EntryTF));
+   Print("ScalpXAU v3.0 initialized on ", _Symbol, " ", EnumToString(EntryTF));
+   Print("FRVP: anchors=", FRVP_Anchors, " bucket=", FRVP_BucketPips,
+         " VA%=", FRVP_ValueAreaPct, " refresh every ", FRVP_RefreshBars, " bars");
+   Print("PA: pin_wick=", PA_MinWickATR, "xATR wick/body>=", PA_WickBodyRatio,
+         " engulf_body>=", PA_MinBodyATR, "xATR trend_gate=", PA_RequireTrend ? "ON" : "OFF");
    Print("Magic: ", MagicNumber, " | Risk: ", RiskPerTradePct, "% per trade, max ", MaxDailyRiskPct, "% daily");
 
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Expert deinitialization                                          |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   IndicatorRelease(hRSI);
    if(hMAFast != INVALID_HANDLE) IndicatorRelease(hMAFast);
    if(hMASlow != INVALID_HANDLE) IndicatorRelease(hMASlow);
-   if(hGainzEMA != INVALID_HANDLE) IndicatorRelease(hGainzEMA);
    Comment("");
    Print("ScalpXAU deinitialized (reason: ", reason, ")");
 }
@@ -331,10 +243,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   //--- Daily reset at midnight
    ResetDaily();
 
-   //--- Emergency stop check
    if(g_stats.tradingStopped)
    {
       CloseAllPositions("DD_LIMIT");
@@ -342,30 +252,39 @@ void OnTick()
       return;
    }
 
-   //--- Update ATR
    g_atrValue = CalcATR(14, EntryTF);
-
-   //--- Tick counter for heartbeat
    g_tickCount++;
 
-   //--- Update swing points on new bar
    if(IsNewBar())
    {
-      SessionType prevSession = GetCurrentSession();
       UpdateSwingPoints();
       DetectSessionLevels();
 
-      //--- Log session info on every new bar (always visible)
+      //--- Refresh FRVP periodically
+      g_frvpRefreshCounter++;
+      if(g_frvpRefreshCounter >= FRVP_RefreshBars)
+      {
+         g_frvpRefreshCounter = 0;
+         if(RefreshFRVP())
+            FRVP_PrintProfile(g_frvp.current, _Symbol);
+      }
+
+      //--- Refresh S/R every 12 bars (~3h on M15)
+      if(EnableSR && g_frvpRefreshCounter % 2 == 0)
+      {
+         if(SR_Scan(g_sr, _Symbol, EntryTF, PERIOD_M15, g_atrValue, SR_ZoneATR, SR_SwingLen))
+         {
+            if(DebugMode) SR_PrintLevels(g_sr.current, _Symbol);
+         }
+      }
+
       Print("NEWBAR | Sess=", GetSessionName(GetCurrentSession()),
             " GMT=", GetGMTHour(), ":", StringFormat("%02d", GetGMTMin()),
             " ATR=", DoubleToString(g_atrValue, 1),
-            " Range=", (g_asianRangeReady ? "Y" : "N"),
-            " FVG=", g_fvgCount,
-            " Liq=", g_liqCount,
-            " Swings=", ArraySize(g_swingHighIdx), "H ", ArraySize(g_swingLowIdx), "L");
+            " FRVP=", g_frvp.current.valid ? "OK" : "N/A",
+            " POC=", g_frvp.current.valid ? DoubleToString(g_frvp.current.poc, 2) : "---");
    }
 
-   //--- Heartbeat every 100 ticks
    if(g_tickCount >= 100)
    {
       g_tickCount = 0;
@@ -373,53 +292,46 @@ void OnTick()
             " Eq=$", DoubleToString(m_account.Equity(), 2),
             " Pos=", CountOpenPositions(),
             " Trades=", g_stats.tradeCount,
-            " Sess=", GetSessionName(g_currentSession),
-            " ATR=", DoubleToString(g_atrValue, 1));
+            " Sess=", GetSessionName(g_currentSession));
    }
 
-   //--- Manage open positions
    ManagePositions();
-   if(EnableGainzSwing) ManageGainzPositions();
 
-   //--- Check max concurrent positions (fix: was MaxTradesPerSess=15)
-   if(CountOpenPositions() >= MaxPositions)
-   {
-      UpdateComment();
-      return;
-   }
+   if(CountOpenPositions() >= MaxPositions) { UpdateComment(); return; }
 
-   //--- Check for entry signals
    CheckEntry();
 
-   //--- Trend leg: evaluated on every tick (forming M15 bar develops over the
-   //--- bar, so a breakout/pullback can trigger mid-bar). Self-dedups to one
-   //--- fill per bar via g_trendEntryBarTime.
-   if(EnableTrend) CheckTrendEntry();
-
-   //--- Gainz-Swing leg: one attempt per closed H1 bar.
-   if(EnableGainzSwing) CheckGainzEntry();
-
-   //--- Update chart
    UpdateComment();
 }
 
 //+------------------------------------------------------------------+
-//| Check for entry signals per session                              |
+//| Refresh FRVP computation                                         |
+//+------------------------------------------------------------------+
+bool RefreshFRVP()
+{
+   double bucketPips = FRVP_BucketPips;
+   if(bucketPips <= 0) bucketPips = 0.50; // default for gold
+
+   bool ok = FRVP_Compute(g_frvp, _Symbol, ProfileTF, FRVP_Anchors,
+                           bucketPips, FRVP_ValueAreaPct,
+                           FRVP_HVNThreshold, FRVP_LVNThreshold);
+   if(!ok && DebugMode) Print("FRVP compute failed");
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| Check for entry signals                                          |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
-   //--- One entry attempt per bar. Without this, a signal that stays true
-   //--- for several ticks re-fires every tick: the NY-open flip-flop loop
-   //--- and the 100+/hr market-close retry storm seen live on 8/6.
    datetime entryBar = iTime(_Symbol, EntryTF, 0);
    if(entryBar == g_lastEntryBarTime) return;
    g_lastEntryBarTime = entryBar;
 
-   //--- Determine current session
    g_currentSession = GetCurrentSession();
    if(g_currentSession == SESS_NONE) return;
 
-   //--- Reset session trade counter on session change
+   //--- Reset session counter on change
    if(g_stats.lastSession != g_currentSession)
    {
       g_stats.sessionTradeCount = 0;
@@ -430,309 +342,137 @@ void CheckEntry()
             " Eq=$", DoubleToString(g_stats.sessionStartEquity, 2));
    }
 
-   //--- Check session drawdown limit
-   if(!g_stats.sessTradingStopped && g_stats.sessionStartEquity > 0 && g_currentSession != SESS_NONE)
+   //--- Session DD limit
+   if(!g_stats.sessTradingStopped && g_stats.sessionStartEquity > 0)
    {
       double ddPct = (g_stats.sessionStartEquity - m_account.Equity()) / g_stats.sessionStartEquity * 100.0;
       if(ddPct >= MaxSessDDPct)
       {
          g_stats.sessTradingStopped = true;
-         Print("*** SESSION DD LIMIT REACHED: ", DoubleToString(ddPct, 2),
-               "% at ", GetSessionName(g_currentSession), " ***");
+         Print("*** SESSION DD LIMIT: ", DoubleToString(ddPct, 2), "% ***");
       }
    }
    if(g_stats.sessTradingStopped) return;
-
-   //--- Check session trade limit
    if(g_stats.sessionTradeCount >= MaxTradesPerSess) return;
 
+   //--- Need FRVP valid for entries
+   if(!g_frvp.current.valid)
+   {
+      if(DebugMode) Print("FRVP not ready — skipping entry");
+      return;
+   }
+
+   //--- Get trend direction
+   int trendDir = GetTrendDirection();
+
+   //--- Session-specific logic
    switch(g_currentSession)
    {
       case SESS_ASIAN:
-         if(EnableAsian) AsianRangeScalp();
+         CheckAsianEntry(trendDir);
          break;
       case SESS_LONDON:
-         if(EnableLondon) LondonBreakoutRetest();
+         CheckLondonEntry(trendDir);
          break;
       case SESS_NY:
-         if(EnableNY) NYLiquiditySweep();
+         CheckNYEntry(trendDir);
          break;
    }
 }
 
 //+------------------------------------------------------------------+
-//| TREND LEG: MA50/200 regime gate + pullback/breakout entries      |
-//| Buys strength / sells weakness (no RSI cap). Evaluated on every  |
-//| tick so a breakout mid-bar is caught; dedups to one fill per M15 |
-//| bar via g_trendEntryBarTime. Shares session guards & lot sizing. |
+//| Get trend direction from MA50/200                                |
 //+------------------------------------------------------------------+
-bool CheckTrendEntry()
+int GetTrendDirection()
 {
-   if(!EnableTrend) return false;
+   if(!EnableTrendFilter) return 0; // no filter = both directions OK
 
-   //--- Session + guard gates (shared with session strategies)
-   SessionType sess = GetCurrentSession();
-   if(sess == SESS_NONE) return false;
-   if(g_stats.sessTradingStopped) return false;
-   if(g_stats.sessionTradeCount >= MaxTradesPerSess) return false;
-   if(CountOpenPositions() >= MaxPositions) return false;
-
-   //--- One fill per M15 bar (set AFTER open, so the forming bar is evaluated every tick)
-   datetime barTime = iTime(_Symbol, EntryTF, 0);
-   if(barTime == g_trendEntryBarTime) return false;
-
-   //--- Trend regime (M15 MAs)
-   double maFast[], maSlow[];
-   ArraySetAsSeries(maFast, true);
+   double maF[], maSlow[];
+   ArraySetAsSeries(maF, true);
    ArraySetAsSeries(maSlow, true);
-   if(CopyBuffer(hMAFast, 0, 0, 3, maFast) < 3) return false;
-   if(CopyBuffer(hMASlow, 0, 0, 3, maSlow) < 3) return false;
+   if(CopyBuffer(hMAFast, 0, 0, 3, maF) < 3) return 0;
+   if(CopyBuffer(hMASlow, 0, 0, 3, maSlow) < 3) return 0;
 
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, EntryTF, 0, 3, rates) < 3) return false;
-
-   double atr = g_atrValue;
-   if(atr <= 0) return false;
-
-   double sepATR = (maFast[0] - maSlow[0]) / atr;
-   //--- Trend-quality gate: BOTH MAs must slope with the trend (kills chop whipsaws)
-   bool fastRising  = (maFast[1] > maFast[2]);
-   bool fastFalling = (maFast[1] < maFast[2]);
-   bool slowRising  = (maSlow[1] > maSlow[2]);
-   bool slowFalling = (maSlow[1] < maSlow[2]);
-   bool trendUp   = (rates[0].close > maFast[0] && maFast[0] > maSlow[0] && sepATR >=  Trend_MinSep_ATR
-                     && (!Trend_SlopeFilter || (fastRising && slowRising)));
-   bool trendDown = (rates[0].close < maFast[0] && maFast[0] < maSlow[0] && sepATR <= -Trend_MinSep_ATR
-                     && (!Trend_SlopeFilter || (fastFalling && slowFalling)));
-
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double maxTrendSL = 2.5 * atr;
-
-   //--- PULLBACK: prior M15 bar dipped to the fast-MA zone, current bar turns back
-   bool pullbackUp = trendUp
-      && rates[1].close < rates[1].open
-      && rates[1].low  <= maFast[1] + Trend_Pullback_ATR * atr
-      && rates[0].close > rates[0].open
-      && rates[0].high  > rates[1].high;
-
-   bool pullbackDown = trendDown
-      && rates[1].close > rates[1].open
-      && rates[1].high  >= maFast[1] - Trend_Pullback_ATR * atr
-      && rates[0].close < rates[0].open
-      && rates[0].low   < rates[1].low;
-
-   //--- BREAKOUT: current bar extends beyond prior bar in the trend direction
-   bool breakoutUp = trendUp
-      && rates[0].close > rates[0].open
-      && rates[0].high  > rates[1].high + Trend_Breakout_ATR * atr;
-
-   bool breakoutDown = trendDown
-      && rates[0].close < rates[0].open
-      && rates[0].low   < rates[1].low - Trend_Breakout_ATR * atr;
-
-   //--- Trend BUY (pullback preferred when both qualify on the same bar)
-   if(pullbackUp || breakoutUp)
-   {
-      double sl = (pullbackUp
-                   ? MathMin(rates[1].low, rates[0].low)
-                   : rates[0].low) - Trend_SL_Buffer_ATR * atr;
-      double slDist = ask - sl;
-      if(slDist >= Min_SL_ATR * atr && slDist <= maxTrendSL)
-      {
-         double lot = CalcLotSizeRisk(slDist, Trend_RiskPct);
-         if(lot > 0 && VerifyTrade(ORDER_TYPE_BUY, ask, sl, 0.0, lot))
-         {
-            if(OpenOrder(ORDER_TYPE_BUY, lot, ask, sl, 0.0, CommentPrefix + "_T_BUY"))
-            {
-               g_stats.tradeCount++;
-               g_stats.sessionTradeCount++;
-               g_trendEntryBarTime = barTime;
-               Print("TREND BUY (", pullbackUp ? "PULLBACK" : "BREAKOUT",
-                     "): close=", DoubleToString(rates[0].close, digits),
-                     " SL=", DoubleToString(slDist / atr, 2), "xATR");
-               return true;
-            }
-         }
-         else if(DebugMode) Print("TREND BUY REJECTED: SL ", DoubleToString(slDist / atr, 2), "xATR");
-      }
-   }
-
-   //--- Trend SELL
-   if(pullbackDown || breakoutDown)
-   {
-      double sl = (pullbackDown
-                   ? MathMax(rates[1].high, rates[0].high)
-                   : rates[0].high) + Trend_SL_Buffer_ATR * atr;
-      double slDist = sl - bid;
-      if(slDist >= Min_SL_ATR * atr && slDist <= maxTrendSL)
-      {
-         double lot = CalcLotSizeRisk(slDist, Trend_RiskPct);
-         if(lot > 0 && VerifyTrade(ORDER_TYPE_SELL, bid, sl, 0.0, lot))
-         {
-            if(OpenOrder(ORDER_TYPE_SELL, lot, bid, sl, 0.0, CommentPrefix + "_T_SELL"))
-            {
-               g_stats.tradeCount++;
-               g_stats.sessionTradeCount++;
-               g_trendEntryBarTime = barTime;
-               Print("TREND SELL (", pullbackDown ? "PULLBACK" : "BREAKOUT",
-                     "): close=", DoubleToString(rates[0].close, digits),
-                     " SL=", DoubleToString(slDist / atr, 2), "xATR");
-               return true;
-            }
-         }
-         else if(DebugMode) Print("TREND SELL REJECTED: SL ", DoubleToString(slDist / atr, 2), "xATR");
-      }
-   }
-
-   return false;
+   if(maF[0] > maSlow[0] && maF[1] > maSlow[1]) return +1;
+   if(maF[0] < maSlow[0] && maF[1] < maSlow[1]) return -1;
+   return 0;
 }
 
 //+------------------------------------------------------------------+
-//| ASIAN SESSION: Range-bound scalping                              |
-//| S/R zones on M15, RSI OB/OS, pin bar/engulfing entry            |
-//| TP 10-15 pips, SL outside range                                 |
+//| ASIAN SESSION: Range at FRVP zones                               |
+//| Trade pin bars at VAL (buy) or VAH (sell) during ranging Asian   |
 //+------------------------------------------------------------------+
-void AsianRangeScalp()
+void CheckAsianEntry(int trendDir)
 {
-   //--- Need swings for S/R zones
-   if(!g_swingReady) return;
+   if(!g_asianRangeReady || g_asianHigh <= 0 || g_asianLow <= 0) return;
 
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, EntryTF, 0, 10, rates) < 5) return;
+   if(CopyRates(_Symbol, EntryTF, 0, 5, rates) < 3) return;
 
-   //--- RSI buffer
-   double rsi[];
-   ArraySetAsSeries(rsi, true);
-   if(CopyBuffer(hRSI, 0, 0, 5, rsi) < 3) return;
-
-   //--- Price data for last closed bar
-   int bar = 1; // last closed bar
-   double open  = rates[bar].open;
-   double high  = rates[bar].high;
-   double low   = rates[bar].low;
-   double close = rates[bar].close;
-   double body  = MathAbs(close - open);
-   double totalRange = high - low;
-   double lowerWick = MathMin(close, open) - low;
-   double upperWick = high - MathMax(close, open);
-   bool isBull = close > open;
-   bool isBear = close < open;
-
-   //--- Detect pin bar
-   bool isPinBar = false;
-   double wickThreshold = body * 0.5;
-   if(isBull && lowerWick >= wickThreshold && upperWick <= body * 0.3)
-      isPinBar = true;  // bullish pin bar (long lower wick)
-   if(isBear && upperWick >= wickThreshold && lowerWick <= body * 0.3)
-      isPinBar = true;  // bearish pin bar (long upper wick)
-
-   //--- Detect engulfing
-   bool isEngulfBull = false;
-   bool isEngulfBear = false;
-   if(bar + 1 < ArraySize(rates))
-   {
-      double prevBody = MathAbs(rates[bar+1].close - rates[bar+1].open);
-      bool prevBear = rates[bar+1].close < rates[bar+1].open;
-      bool prevBull = rates[bar+1].close > rates[bar+1].open;
-      // Bullish engulfing: prev bearish, current bullish, body covers prev body
-      if(isBull && prevBear && body > prevBody * 1.1 && close > rates[bar+1].open && open < rates[bar+1].close)
-         isEngulfBull = true;
-      // Bearish engulfing: prev bullish, current bearish, body covers prev body
-      if(isBear && prevBull && body > prevBody * 1.1 && close < rates[bar+1].open && open > rates[bar+1].close)
-         isEngulfBear = true;
-   }
-
-   bool rejectionCandle = isPinBar || isEngulfBull || isEngulfBear;
-
-   //--- Scan for S/R zones from swing points
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double atr = g_atrValue;
    if(atr <= 0) return;
 
-   //--- Check each swing high as resistance zone
-   for(int i = 0; i < ArraySize(g_swingHighIdx) && i < 10; i++)
+   double zoneTol = atr * FRVP_ZoneTolATR;
+   FRVPResult prof = g_frvp.current;
+
+   //--- Get price action on last 2 closed bars
+   PASignal pa = PA_AggregateScore(rates, 5, atr,
+                                    prof.vah, prof.val,
+                                    PA_MinWickATR, PA_WickBodyRatio,
+                                    PA_MinBodyATR, PA_MinMoveATR);
+
+   //--- BUY: price at VAL + bullish PA + not in downtrend + support nearby
+   if(pa.direction == +1)
    {
-      double zoneLevel = g_swingHighVal[i];
-      double zoneRange = atr * 0.6; // zone thickness
+      bool atVAL = FRVP_AtVAL(prof, bid, zoneTol);
+      bool atLVN = FRVP_NearLVN(prof, bid, zoneTol) >= 0;
+      bool trendOk = (!PA_RequireTrend || trendDir >= 0);
+      bool atSupp = EnableSR ? SR_AtSupport(g_sr.current, bid, zoneTol) : true;
+      bool atAsianLow = MathAbs(bid - g_asianLow) <= zoneTol;
 
-      //--- Price near resistance zone (from below)
-      if(MathAbs(high - zoneLevel) <= zoneRange && isBear && rejectionCandle)
+      if((atVAL || atLVN || atSupp || atAsianLow) && trendOk)
       {
-         //--- RSI overbought confirmation
-         if(rsi[1] >= RSI_OB)
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
          {
-            //--- SELL entry
-            double sl = zoneLevel + Asian_SL_BufferATR * atr;
-            double slDist = MathAbs(sl - close);
-            if(slDist <= 0) continue;
-            //--- Floor: never let a stop sit inside normal noise (live: sub-ATR stops clipped every tick)
-            if(slDist < Min_SL_ATR * atr) { slDist = Min_SL_ATR * atr; sl = close + slDist; }
-            //--- Fix: TP at least 1.5:1 with SL (was fixed 12 pips — often smaller than SL)
-            double tp = close - MathMax(Asian_TP_Pips * 10 * SymbolInfoDouble(_Symbol, SYMBOL_POINT), slDist * 1.5);
-
-            double lot = CalcLotSizeRisk(slDist, RiskPerTradePct);
-            if(lot >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) && VerifyTrade(ORDER_TYPE_SELL, bid, sl, tp, lot))
-            {
-               if(OpenOrder(ORDER_TYPE_SELL, lot, bid, sl, tp, CommentPrefix + "_ASIAN_SELL"))
-               {
-                  g_stats.tradeCount++;
-                  g_stats.sessionTradeCount++;
-                  if(DebugMode) Print("ASIAN SELL: zone=", zoneLevel, " RSI=", rsi[1]);
-               }
-            }
+            srSL = SR_NearestSupportBelow(g_sr.current, bid);
+            srTP = SR_NearestResistanceAbove(g_sr.current, bid);
          }
+         ExecuteTrade(ORDER_TYPE_BUY, bid, atr, "ASIAN", pa.patternName, srSL, srTP);
       }
    }
 
-   //--- Check each swing low as support zone
-   for(int i = 0; i < ArraySize(g_swingLowIdx) && i < 10; i++)
+   //--- SELL: price at VAH + bearish PA + not in uptrend + resistance nearby
+   if(pa.direction == -1)
    {
-      double zoneLevel = g_swingLowVal[i];
-      double zoneRange = atr * 0.6;
+      bool atVAH = FRVP_AtVAH(prof, ask, zoneTol);
+      bool atLVN = FRVP_NearLVN(prof, ask, zoneTol) >= 0;
+      bool trendOk = (!PA_RequireTrend || trendDir <= 0);
+      bool atRes = EnableSR ? SR_AtResistance(g_sr.current, ask, zoneTol) : true;
+      bool atAsianHigh = MathAbs(ask - g_asianHigh) <= zoneTol;
 
-      //--- Price near support zone (from above)
-      if(MathAbs(low - zoneLevel) <= zoneRange && isBull && rejectionCandle)
+      if((atVAH || atLVN || atRes || atAsianHigh) && trendOk)
       {
-         //--- RSI oversold confirmation
-         if(rsi[1] <= RSI_OS)
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
          {
-            //--- BUY entry
-            double sl = zoneLevel - Asian_SL_BufferATR * atr;
-            double slDist = MathAbs(close - sl);
-            if(slDist <= 0) continue;
-            //--- Floor: never let a stop sit inside normal noise (live: sub-ATR stops clipped every tick)
-            if(slDist < Min_SL_ATR * atr) { slDist = Min_SL_ATR * atr; sl = close - slDist; }
-            //--- Fix: TP at least 1.5:1 with SL (was fixed 12 pips — often smaller than SL)
-            double tp = close + MathMax(Asian_TP_Pips * 10 * SymbolInfoDouble(_Symbol, SYMBOL_POINT), slDist * 1.5);
-
-            double lot = CalcLotSizeRisk(slDist, RiskPerTradePct);
-            if(lot >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) && VerifyTrade(ORDER_TYPE_BUY, ask, sl, tp, lot))
-            {
-               if(OpenOrder(ORDER_TYPE_BUY, lot, ask, sl, tp, CommentPrefix + "_ASIAN_BUY"))
-               {
-                  g_stats.tradeCount++;
-                  g_stats.sessionTradeCount++;
-                  if(DebugMode) Print("ASIAN BUY: zone=", zoneLevel, " RSI=", rsi[1]);
-               }
-            }
+            srSL = SR_NearestSupportAbove(g_sr.current, ask);
+            srTP = SR_NearestResistanceBelow(g_sr.current, ask);
          }
+         ExecuteTrade(ORDER_TYPE_SELL, ask, atr, "ASIAN", pa.patternName, srSL, srTP);
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| LONDON SESSION: Breakout+Retest                                  |
-//| Mark Asian range, breakout close, retest entry, FVG/OB confluence|
-//| TP 2x SL, 1% risk                                               |
+//| LONDON SESSION: Breakout with FRVP confirmation                  |
+//| Trade breakouts from Asian range with BOS at FRVP levels         |
 //+------------------------------------------------------------------+
-void LondonBreakoutRetest()
+void CheckLondonEntry(int trendDir)
 {
-   //--- Need Asian range
    if(!g_asianRangeReady || g_asianHigh <= 0 || g_asianLow <= 0) return;
 
    MqlRates rates[];
@@ -744,456 +484,340 @@ void LondonBreakoutRetest()
    double atr = g_atrValue;
    if(atr <= 0) return;
 
-   //--- Check for breakouts
-   int breakDir = 0; // 1=bull breakout, -1=bear breakout
+   FRVPResult prof = g_frvp.current;
+   double zoneTol = atr * FRVP_ZoneTolATR;
+
+   //--- Detect breakout from Asian range
+   int breakDir = 0;
    int breakBar = -1;
 
    for(int c = 1; c <= 8; c++)
    {
       if(c >= ArraySize(rates)) break;
-      //--- Bull breakout: close above Asian high
       if(rates[c].close > g_asianHigh && rates[c].close > rates[c].open)
-      {
-         breakDir = 1;
-         breakBar = c;
-      }
-      //--- Bear breakout: close below Asian low
-      else if(rates[c].close < g_asianLow && rates[c].close < rates[c].open)
-      {
-         breakDir = -1;
-         breakBar = c;
-      }
-      if(breakDir != 0) break;
+      { breakDir = 1; breakBar = c; break; }
+      if(rates[c].close < g_asianLow && rates[c].close < rates[c].open)
+      { breakDir = -1; breakBar = c; break; }
    }
-
-   //--- No breakout found
    if(breakDir == 0) return;
 
    //--- Look for retest after breakout
-   bool retestHit = false;
-   double entryPrice = 0;
-   double retestSL = 0;
-   double retestTP = 0;
-
-   //--- FVG check
-   bool fvgFound = false;
-   DetectFVG();
-
-   int retestBar = -1;
    for(int c = breakBar - 1; c >= 1 && c > breakBar - 5; c--)
    {
       if(c <= 0 || c >= ArraySize(rates)) continue;
 
-      if(breakDir == 1) // Bull breakout: retest of Asian high as support
-      {
-         // Price pulls back to near Asian high
-         if(rates[c].low <= g_asianHigh * 1.002 && rates[c].low >= g_asianHigh * 0.995)
-         {
-            // Rejection candle (bullish) at retest
-            if(rates[c].close > rates[c].open && rates[c].close > g_asianHigh)
-            {
-               // Check FVG confluence if available
-               bool fvgOk = true;
-               for(int f = 0; f < g_fvgCount; f++)
-               {
-                  if(g_fvgList[f].bullish && g_fvgList[f].lower <= g_asianHigh * 1.005
-                     && g_fvgList[f].upper >= g_asianHigh * 0.995)
-                  {
-                     fvgOk = true;
-                     fvgFound = true;
-                     break;
-                  }
-               }
+      PASignal pa = PA_DetectPinBar(rates[c], rates[c + 1], atr, PA_MinWickATR, PA_WickBodyRatio);
+      if(pa.direction == 0)
+         pa = PA_DetectEngulfing(rates[c], rates[c + 1], atr, PA_MinBodyATR);
 
-               if(fvgOk)
+      if(breakDir == 1) // Bull breakout
+      {
+         if(pa.direction == +1 && rates[c].close > g_asianHigh)
+         {
+            //--- Bonus: price is at a FRVP zone (VAL support or HVN)
+            bool frvpConfirm = FRVP_AtVAL(prof, bid, zoneTol * 2) ||
+                               FRVP_NearHVN(prof, bid, zoneTol * 2) >= 0 ||
+                               bid <= prof.vah; // inside VA = acceptable
+
+            bool trendOk = (!PA_RequireTrend || trendDir >= 0);
+
+            if(frvpConfirm && trendOk)
+            {
+               double srSL = 0, srTP = 0;
+               if(EnableSR && g_sr.current.valid)
                {
-                  retestHit = true;
-                  retestBar = c;
-                  entryPrice = ask;
-                  double slDist = atr * 0.5; // tighter stop for breakout
-                  if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-                  retestSL = g_asianHigh - slDist;
-                  retestTP = entryPrice + slDist * London_RR;
-                  break;
+                  srSL = SR_NearestSupportBelow(g_sr.current, bid);
+                  srTP = SR_NearestResistanceAbove(g_sr.current, bid);
                }
+               ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "LONDON", pa.patternName, srSL, srTP);
+               return;
             }
          }
       }
-      else if(breakDir == -1) // Bear breakout: retest of Asian low as resistance
+      else if(breakDir == -1) // Bear breakout
       {
-         if(rates[c].high >= g_asianLow * 0.998 && rates[c].high <= g_asianLow * 1.005)
+         if(pa.direction == -1 && rates[c].close < g_asianLow)
          {
-            if(rates[c].close < rates[c].open && rates[c].close < g_asianLow)
+            bool frvpConfirm = FRVP_AtVAH(prof, ask, zoneTol * 2) ||
+                               FRVP_NearHVN(prof, ask, zoneTol * 2) >= 0 ||
+                               ask >= prof.val;
+
+            bool trendOk = (!PA_RequireTrend || trendDir <= 0);
+
+            if(frvpConfirm && trendOk)
             {
-               bool fvgOk = true;
-               for(int f = 0; f < g_fvgCount; f++)
+               double srSL = 0, srTP = 0;
+               if(EnableSR && g_sr.current.valid)
                {
-                  if(!g_fvgList[f].bullish && g_fvgList[f].lower <= g_asianLow * 1.005
-                     && g_fvgList[f].upper >= g_asianLow * 0.995)
-                  {
-                     fvgOk = true;
-                     fvgFound = true;
-                     break;
-                  }
+                  srSL = SR_NearestSupportAbove(g_sr.current, ask);
+                  srTP = SR_NearestResistanceBelow(g_sr.current, ask);
                }
-
-               if(fvgOk)
-               {
-                  retestHit = true;
-                  retestBar = c;
-                  entryPrice = bid;
-                  double slDist = atr * 0.5;
-                  if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-                  retestSL = g_asianLow + slDist;
-                  retestTP = entryPrice - slDist * London_RR;
-                  break;
-               }
+               ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "LONDON", pa.patternName, srSL, srTP);
+               return;
             }
-         }
-      }
-   }
-
-   //--- Execute trade on retest
-   if(retestHit && entryPrice > 0 && retestSL > 0 && retestTP > 0)
-   {
-      double lot = CalcLotSizeRisk(MathAbs(entryPrice - retestSL), London_RiskPct);
-      double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-      if(lot < minVol) lot = minVol;
-
-      int orderType = (breakDir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      double price  = (orderType == ORDER_TYPE_BUY) ? ask : bid;
-
-      if(VerifyTrade(orderType, price, retestSL, retestTP, lot))
-      {
-         if(OpenOrder(orderType, lot, price, retestSL, retestTP, CommentPrefix + "_LONDON_" + (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL")))
-         {
-            g_stats.tradeCount++;
-            g_stats.sessionTradeCount++;
-            if(DebugMode) Print("LONDON ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
-                  " AsianRange: ", g_asianHigh, "/", g_asianLow,
-                  " Retest@", retestBar, " FVG=", fvgFound);
          }
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| NY SESSION: Liquidity Sweep + Reversal                           |
-//| Identify equal highs/lows, sweep with wick, BOS, retest entry   |
+//| NY SESSION: Liquidity sweep + FRVP zone reversal                 |
+//| Sweep highs/lows, then reverse at FRVP POC/VAH/VAL with PA      |
 //+------------------------------------------------------------------+
-void NYLiquiditySweep()
+void CheckNYEntry(int trendDir)
 {
-   //--- Need swing points
-   if(!g_swingReady) return;
-
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, EntryTF, 0, SweepLookback + 5, rates) < SweepLookback) return;
+   if(CopyRates(_Symbol, EntryTF, 0, 20, rates) < 10) return;
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double atr = g_atrValue;
    if(atr <= 0) return;
 
-   //--- STEP 1: Identify liquidity levels (equal highs/lows or clear session highs/lows)
-   DetectLiquidityLevels(rates);
+   FRVPResult prof = g_frvp.current;
+   double zoneTol = atr * FRVP_ZoneTolATR;
 
-   //--- STEP 2: Check for sweep of a liquidity level
-   int sweptLevel = -1;
-   int sweepBar = -1;
+   //--- Detect sweep: wick above/below recent high/low with rejection
+   int bar = 1; // last closed
+   if(bar >= ArraySize(rates)) return;
 
-   for(int i = 0; i < g_liqCount; i++)
+   double barHigh = rates[bar].high;
+   double barLow  = rates[bar].low;
+   double barClose = rates[bar].close;
+   double barOpen  = rates[bar].open;
+   double wickUp   = barHigh - MathMax(barClose, barOpen);
+   double wickDown = MathMin(barClose, barOpen) - barLow;
+   double body     = MathAbs(barClose - barOpen);
+   double range    = barHigh - barLow;
+
+   if(range <= 0) return;
+
+   //--- Bullish sweep: long lower wick (swept lows) + rejection
+   bool bullSweep = (wickDown >= atr * 0.3 && wickDown >= body * 1.5 && barClose > barOpen);
+
+   //--- Bearish sweep: long upper wick + rejection
+   bool bearSweep = (wickUp >= atr * 0.3 && wickUp >= body * 1.5 && barClose < barOpen);
+
+   //--- Check if sweep targets FRVP zone
+   if(bullSweep)
    {
-      if(g_liqLevels[i].swept) continue;
+      //--- Price swept below and is now at/below VAL or POC
+      bool atPOC  = FRVP_AtPOC(prof, bid, zoneTol * 2);
+      bool atVAL  = FRVP_AtVAL(prof, bid, zoneTol * 2);
+      bool trendOk = (!PA_RequireTrend || trendDir >= 0);
 
-      //--- Check recent bars for sweep
-      for(int c = 1; c <= 3; c++)
+      //--- Also: PA confirmation from the bar itself
+      PASignal pa = PA_DetectPinBar(rates[bar], rates[bar + 1], atr, PA_MinWickATR, PA_WickBodyRatio);
+
+      if((atPOC || atVAL || pa.direction == +1) && trendOk)
       {
-         if(c >= ArraySize(rates)) break;
-
-         if(g_liqLevels[i].isHigh)
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
          {
-            // Price spiked above with wick (not close above)
-            if(rates[c].high > g_liqLevels[i].price * 1.0005)
-            {
-               double wick = rates[c].high - MathMax(rates[c].close, rates[c].open);
-               double body = MathAbs(rates[c].close - rates[c].open);
-               // Strong wick = rejection (liquidity sweep)
-               if(wick >= body * 0.5 && rates[c].close < rates[c].open)
-               {
-                  sweptLevel = i;
-                  sweepBar = c;
-                  g_liqLevels[i].swept = true;
-                  break;
-               }
-            }
+            srSL = SR_NearestSupportBelow(g_sr.current, bid);
+            srTP = SR_NearestResistanceAbove(g_sr.current, bid);
          }
-         else
-         {
-            // Price spiked below with wick
-            if(rates[c].low < g_liqLevels[i].price * 0.9995)
-            {
-               double wick = MathMin(rates[c].close, rates[c].open) - rates[c].low;
-               double body = MathAbs(rates[c].close - rates[c].open);
-               if(wick >= body * 0.5 && rates[c].close > rates[c].open)
-               {
-                  sweptLevel = i;
-                  sweepBar = c;
-                  g_liqLevels[i].swept = true;
-                  break;
-               }
-            }
-         }
-      }
-      if(sweptLevel >= 0) break;
-   }
-
-   if(sweptLevel < 0) return;
-
-   //--- STEP 3: Confirm BOS (Break of Structure)
-   // For sell reversal: price broke a swing low after sweeping liquidity
-   // For buy reversal: price broke a swing high after sweeping liquidity
-   bool bosConfirmed = false;
-
-   if(g_liqLevels[sweptLevel].isHigh)
-   {
-      // Swept high → looking for sell. BOS = broke a recent swing low
-      for(int c = sweepBar + 1; c <= sweepBar + 3 && c < ArraySize(rates); c++)
-      {
-         if(c < 1) continue;
-         double recentLow = rates[c].low;
-         // Check if price broke below a recent swing low
-         for(int s = 0; s < ArraySize(g_swingLowIdx); s++)
-         {
-            if(g_swingLowVal[s] > recentLow && g_swingLowVal[s] < g_liqLevels[sweptLevel].price * 0.999)
-            {
-               bosConfirmed = true;
-               break;
-            }
-         }
-         if(bosConfirmed) break;
-      }
-   }
-   else
-   {
-      // Swept low → looking for buy. BOS = broke a recent swing high
-      for(int c = sweepBar + 1; c <= sweepBar + 3 && c < ArraySize(rates); c++)
-      {
-         if(c < 1) continue;
-         double recentHigh = rates[c].high;
-         for(int s = 0; s < ArraySize(g_swingHighIdx); s++)
-         {
-            if(g_swingHighVal[s] < recentHigh && g_swingHighVal[s] > g_liqLevels[sweptLevel].price * 1.001)
-            {
-               bosConfirmed = true;
-               break;
-            }
-         }
-         if(bosConfirmed) break;
+         ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY", "Sweep_BULL+" + (atPOC ? "POC" : atVAL ? "VAL" : pa.patternName), srSL, srTP);
+         return;
       }
    }
 
-   if(!bosConfirmed) return;
-
-   //--- STEP 4: Enter on retest or confirmation candle
-   // Check last closed bar for retest of the swept level
-   int bar = 1; // last closed bar
-   double entryPrice = 0;
-   double sl = 0;
-   double tp = 0;
-   int orderType = -1;
-
-   if(g_liqLevels[sweptLevel].isHigh)
+   if(bearSweep)
    {
-      // Sell: price swept high, BOS down, now retesting the swept area
-      if(rates[bar].high >= g_liqLevels[sweptLevel].price * 0.998
-         && rates[bar].close < rates[bar].open)
-      {
-         orderType = ORDER_TYPE_SELL;
-         entryPrice = bid;
-         double slDist = atr * 0.6;
-         if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-         sl = g_liqLevels[sweptLevel].price + slDist;
-         tp = entryPrice - slDist * NY_RR;
+      bool atPOC  = FRVP_AtPOC(prof, ask, zoneTol * 2);
+      bool atVAH  = FRVP_AtVAH(prof, ask, zoneTol * 2);
+      bool trendOk = (!PA_RequireTrend || trendDir <= 0);
 
-         // Prefer FVG or previous structure as TP
-         for(int f = 0; f < g_fvgCount; f++)
-         {
-            if(!g_fvgList[f].bullish && g_fvgList[f].lower < entryPrice
-               && g_fvgList[f].lower > entryPrice - slDist * NY_RR * 0.5)
-            {
-               tp = g_fvgList[f].lower;
-               if(DebugMode) Print("NY TP set to FVG fill: ", tp);
-               break;
-            }
-         }
-      }
-   }
-   else
-   {
-      // Buy: price swept low, BOS up, now retesting the swept area
-      if(rates[bar].low <= g_liqLevels[sweptLevel].price * 1.002
-         && rates[bar].close > rates[bar].open)
-      {
-         orderType = ORDER_TYPE_BUY;
-         entryPrice = ask;
-         double slDist = atr * 0.6;
-         if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
-         sl = g_liqLevels[sweptLevel].price - slDist;
-         tp = entryPrice + slDist * NY_RR;
+      PASignal pa = PA_DetectPinBar(rates[bar], rates[bar + 1], atr, PA_MinWickATR, PA_WickBodyRatio);
 
-         for(int f = 0; f < g_fvgCount; f++)
+      if((atPOC || atVAH || pa.direction == -1) && trendOk)
+      {
+         double srSL = 0, srTP = 0;
+         if(EnableSR && g_sr.current.valid)
          {
-            if(g_fvgList[f].bullish && g_fvgList[f].upper > entryPrice
-               && g_fvgList[f].upper < entryPrice + slDist * NY_RR * 0.5)
-            {
-               tp = g_fvgList[f].upper;
-               if(DebugMode) Print("NY TP set to FVG fill: ", tp);
-               break;
-            }
+            srSL = SR_NearestSupportAbove(g_sr.current, ask);
+            srTP = SR_NearestResistanceBelow(g_sr.current, ask);
          }
+         ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY", "Sweep_BEAR+" + (atPOC ? "POC" : atVAH ? "VAH" : pa.patternName), srSL, srTP);
+         return;
       }
    }
 
-   if(orderType < 0 || entryPrice <= 0 || sl <= 0 || tp <= 0) return;
+   //--- Also: direct FRVP zone reaction (no sweep required for POC)
+   PASignal pa = PA_AggregateScore(rates, 20, atr,
+                                    prof.vah, prof.val,
+                                    PA_MinWickATR, PA_WickBodyRatio,
+                                    PA_MinBodyATR, PA_MinMoveATR);
 
-   double lot = CalcLotSizeRisk(MathAbs(entryPrice - sl), NY_RiskPct);
-   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   if(lot < minVol) lot = minVol;
-
-   double price = (orderType == ORDER_TYPE_BUY) ? ask : bid;
-
-   if(VerifyTrade(orderType, price, sl, tp, lot))
+   if(pa.strength >= 3) // at least medium-strength PA
    {
-      if(OpenOrder(orderType, lot, price, sl, tp, CommentPrefix + "_NY_" + (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL")))
+      if(pa.direction == +1 && (FRVP_AtPOC(prof, bid, zoneTol) || SR_AtSupport(g_sr.current, bid, zoneTol)))
       {
-         g_stats.tradeCount++;
-         g_stats.sessionTradeCount++;
-         if(DebugMode) Print("NY ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
-               " Swept: ", g_liqLevels[sweptLevel].isHigh ? "High" : "Low",
-               "@", g_liqLevels[sweptLevel].price,
-               " RR=", NY_RR);
+         bool trendOk = (!PA_RequireTrend || trendDir >= 0);
+         if(trendOk)
+         {
+            double srSL = 0, srTP = 0;
+            if(EnableSR && g_sr.current.valid)
+            {
+               srSL = SR_NearestSupportBelow(g_sr.current, bid);
+               srTP = SR_NearestResistanceAbove(g_sr.current, bid);
+            }
+            ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "NY_POC", pa.patternName, srSL, srTP);
+         }
+      }
+      else if(pa.direction == -1 && (FRVP_AtPOC(prof, ask, zoneTol) || SR_AtResistance(g_sr.current, ask, zoneTol)))
+      {
+         bool trendOk = (!PA_RequireTrend || trendDir <= 0);
+         if(trendOk)
+         {
+            double srSL = 0, srTP = 0;
+            if(EnableSR && g_sr.current.valid)
+            {
+               srSL = SR_NearestSupportAbove(g_sr.current, ask);
+               srTP = SR_NearestResistanceBelow(g_sr.current, ask);
+            }
+            ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "NY_POC", pa.patternName, srSL, srTP);
+         }
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Detect Fair Value Gap (FVG) from recent candles                  |
+//| Execute a trade with risk-based sizing                           |
+//| srSL/srTP = S/R-derived levels (0 = use ATR-based defaults)      |
 //+------------------------------------------------------------------+
-void DetectFVG()
+void ExecuteTrade(int orderType, double entryPrice, double atr,
+                  string sessionTag, string paTag,
+                  double srSL = 0, double srTP = 0)
 {
-   g_fvgCount = 0;
-   ArrayResize(g_fvgList, 10);
+   if(atr <= 0) return;
 
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, EntryTF, 0, 30, rates) < 10) return;
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double slDist = atr * Min_SL_ATR;
+   if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
 
-   for(int i = 1; i < 25; i++)
+   double tpDist = atr * 2.0;
+   FRVPResult prof = g_frvp.current;
+
+   if(orderType == ORDER_TYPE_BUY)
    {
-      if(i + 2 >= ArraySize(rates)) break;
+      double sl = entryPrice - slDist;
+      double tp = entryPrice + tpDist;
 
-      // Bullish FVG: candle i+1 low > candle i high (gap up)
-      if(rates[i+1].low > rates[i].high)
+      //--- S/R SL: place below nearest support
+      if(srSL > 0 && srSL < entryPrice)
       {
-         g_fvgList[g_fvgCount].bullish = true;
-         g_fvgList[g_fvgCount].upper = rates[i+1].low;
-         g_fvgList[g_fvgCount].lower = rates[i].high;
-         g_fvgList[g_fvgCount].time = rates[i+1].time;
-         g_fvgCount++;
-      }
-      // Bearish FVG: candle i+1 high < candle i low (gap down)
-      else if(rates[i+1].high < rates[i].low)
-      {
-         g_fvgList[g_fvgCount].bullish = false;
-         g_fvgList[g_fvgCount].upper = rates[i].low;
-         g_fvgList[g_fvgCount].lower = rates[i+1].high;
-         g_fvgList[g_fvgCount].time = rates[i+1].time;
-         g_fvgCount++;
+         double srDist = entryPrice - srSL;
+         if(srDist >= Min_SL_ATR * atr && srDist <= atr * 3.0)
+            sl = srSL - atr * 0.2; // buffer below support
       }
 
-      if(g_fvgCount >= ArraySize(g_fvgList)) break;
+      //--- S/R TP: target nearest resistance above
+      if(srTP > 0 && srTP > entryPrice)
+      {
+         double srTDDist = srTP - entryPrice;
+         if(srTDDist >= slDist * 1.2 && srTDDist <= atr * 5.0)
+            tp = srTP;
+      }
+
+      //--- Fallback: FRVP zone as TP
+      if(tp == entryPrice + tpDist && prof.valid)
+      {
+         double nearestZone = prof.vah;
+         if(prof.poc > entryPrice + slDist * 1.5)
+            nearestZone = prof.poc;
+         if(nearestZone > entryPrice + slDist * 0.5 && nearestZone < entryPrice + atr * 4.0)
+            tp = nearestZone;
+      }
+
+      //--- Ensure min 1.5:1 RR
+      slDist = entryPrice - sl;
+      if(tp - entryPrice < slDist * 1.5) tp = entryPrice + slDist * 1.5;
+
+      sl = NormalizeDouble(sl, digits);
+      tp = NormalizeDouble(tp, digits);
+
+      double lot = CalcLotSizeRisk(entryPrice - sl, RiskPerTradePct);
+      if(lot <= 0) return;
+
+      if(VerifyTrade(ORDER_TYPE_BUY, entryPrice, sl, tp, lot))
+      {
+         string comment = CommentPrefix + "_FRVP_BUY_" + sessionTag;
+         if(OpenOrder(ORDER_TYPE_BUY, lot, entryPrice, sl, tp, comment))
+         {
+            g_stats.tradeCount++;
+            g_stats.sessionTradeCount++;
+            Print("FRVP BUY ", sessionTag, ": ", paTag,
+                  " price=", DoubleToString(entryPrice, digits),
+                  " SL=", DoubleToString(sl, digits),
+                  " TP=", DoubleToString(tp, digits),
+                  " POC=", DoubleToString(prof.poc, digits),
+                  " SR_SL=", DoubleToString(srSL, digits),
+                  " SR_TP=", DoubleToString(srTP, digits));
+         }
+      }
+   }
+   else if(orderType == ORDER_TYPE_SELL)
+   {
+      double sl = entryPrice + slDist;
+      double tp = entryPrice - tpDist;
+
+      //--- S/R SL: place above nearest resistance
+      if(srSL > 0 && srSL > entryPrice)
+      {
+         double srDist = srSL - entryPrice;
+         if(srDist >= Min_SL_ATR * atr && srDist <= atr * 3.0)
+            sl = srSL + atr * 0.2; // buffer above resistance
+      }
+
+      //--- S/R TP: target nearest support below
+      if(srTP > 0 && srTP < entryPrice)
+      {
+         double srTDDist = entryPrice - srTP;
+         if(srTDDist >= slDist * 1.2 && srTDDist <= atr * 5.0)
+            tp = srTP;
+      }
+
+      //--- Fallback: FRVP zone as TP
+      if(tp == entryPrice - tpDist && prof.valid)
+      {
+         double nearestZone = prof.val;
+         if(prof.poc < entryPrice - slDist * 1.5)
+            nearestZone = prof.poc;
+         if(nearestZone < entryPrice - slDist * 0.5 && nearestZone > entryPrice - atr * 4.0)
+            tp = nearestZone;
+      }
+
+      slDist = sl - entryPrice;
+      if(entryPrice - tp < slDist * 1.5) tp = entryPrice - slDist * 1.5;
+
+      sl = NormalizeDouble(sl, digits);
+      tp = NormalizeDouble(tp, digits);
+
+      double lot = CalcLotSizeRisk(sl - entryPrice, RiskPerTradePct);
+      if(lot <= 0) return;
+
+      if(VerifyTrade(ORDER_TYPE_SELL, entryPrice, sl, tp, lot))
+      {
+         string comment = CommentPrefix + "_FRVP_SELL_" + sessionTag;
+         if(OpenOrder(ORDER_TYPE_SELL, lot, entryPrice, sl, tp, comment))
+         {
+            g_stats.tradeCount++;
+            g_stats.sessionTradeCount++;
+            Print("FRVP SELL ", sessionTag, ": ", paTag,
+                  " price=", DoubleToString(entryPrice, digits),
+                  " SL=", DoubleToString(sl, digits),
+                  " TP=", DoubleToString(tp, digits),
+                  " POC=", DoubleToString(prof.poc, digits));
+         }
+      }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Detect liquidity levels (equal highs/lows) for NY strategy       |
-//+------------------------------------------------------------------+
-void DetectLiquidityLevels(MqlRates &rates[])
-{
-   g_liqCount = 0;
-   ArrayResize(g_liqLevels, 20);
-
-   int lookback = MathMin(SweepLookback, ArraySize(rates) - 3);
-
-   //--- Find equal highs (within 0.5 ATR)
-   for(int i = 1; i < lookback - 5; i++)
-   {
-      for(int j = i + 3; j < lookback - 2; j++)
-      {
-         double diff = MathAbs(rates[i].high - rates[j].high);
-         if(diff <= g_atrValue * 0.2 && diff > 0) // nearly equal highs
-         {
-            // Check if this is a local high (bar before and after are lower)
-            if(i >= 2 && rates[i].high > rates[i-1].high
-               && rates[i].high > rates[i+1].high)
-            {
-               bool dup = false;
-               for(int d = 0; d < g_liqCount; d++)
-               {
-                  if(g_liqLevels[d].isHigh && MathAbs(g_liqLevels[d].price - rates[i].high) < g_atrValue * 0.1)
-                  { dup = true; break; }
-               }
-               if(!dup)
-               {
-                  g_liqLevels[g_liqCount].price = MathMax(rates[i].high, rates[j].high);
-                  g_liqLevels[g_liqCount].time = rates[i].time;
-                  g_liqLevels[g_liqCount].isHigh = true;
-                  g_liqLevels[g_liqCount].swept = false;
-                  g_liqCount++;
-               }
-               break;
-            }
-         }
-      }
-      if(g_liqCount >= ArraySize(g_liqLevels)) break;
-   }
-
-   //--- Find equal lows (within 0.5 ATR)
-   for(int i = 1; i < lookback - 5; i++)
-   {
-      for(int j = i + 3; j < lookback - 2; j++)
-      {
-         double diff = MathAbs(rates[i].low - rates[j].low);
-         if(diff <= g_atrValue * 0.2 && diff > 0)
-         {
-            if(i >= 2 && rates[i].low < rates[i-1].low
-               && rates[i].low < rates[i+1].low)
-            {
-               bool dup = false;
-               for(int d = 0; d < g_liqCount; d++)
-               {
-                  if(!g_liqLevels[d].isHigh && MathAbs(g_liqLevels[d].price - rates[i].low) < g_atrValue * 0.1)
-                  { dup = true; break; }
-               }
-               if(!dup)
-               {
-                  g_liqLevels[g_liqCount].price = MathMin(rates[i].low, rates[j].low);
-                  g_liqLevels[g_liqCount].time = rates[i].time;
-                  g_liqLevels[g_liqCount].isHigh = false;
-                  g_liqLevels[g_liqCount].swept = false;
-                  g_liqCount++;
-               }
-               break;
-            }
-         }
-      }
-      if(g_liqCount >= ArraySize(g_liqLevels)) break;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Track Asian session range for London breakout                    |
+//| Track Asian range                                                |
 //+------------------------------------------------------------------+
 void TrackAsianRange()
 {
@@ -1201,7 +825,6 @@ void TrackAsianRange()
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, EntryTF, 0, 100, rates) < 20) return;
 
-   //--- Find bars within Asian session time (12:30-3:30 GMT)
    g_asianHigh = 0;
    g_asianLow  = 1e9;
    g_asianRangeReady = false;
@@ -1209,16 +832,12 @@ void TrackAsianRange()
 
    for(int i = 0; i < ArraySize(rates); i++)
    {
-      datetime t = rates[i].time;
       MqlDateTime dt;
-      TimeToStruct(t, dt);
-
-      //--- Convert bar time to GMT hour
-      int hourGMT   = dt.hour - g_brokerGMTOffset;
+      TimeToStruct(rates[i].time, dt);
+      int hourGMT = dt.hour - g_brokerGMTOffset;
       if(hourGMT < 0) hourGMT += 24;
       int minuteGMT = dt.min;
 
-      //--- Asian session: 0:30 - 3:30 GMT
       bool inAsian = false;
       if((hourGMT == Asian_StartH && minuteGMT >= Asian_StartM) ||
          (hourGMT > Asian_StartH && hourGMT < Asian_EndH) ||
@@ -1228,77 +847,63 @@ void TrackAsianRange()
       if(inAsian)
       {
          if(rates[i].high > g_asianHigh) g_asianHigh = rates[i].high;
-         if(rates[i].low < g_asianLow)   g_asianLow  = rates[i].low;
+         if(rates[i].low  < g_asianLow)  g_asianLow  = rates[i].low;
          barsInSession++;
       }
-      else if(barsInSession > 0)
-      {
-         //--- Session ended — stop scanning
-         break;
-      }
+      else if(barsInSession > 0) break;
    }
 
    if(g_asianHigh > 0 && g_asianLow < 1e8 && barsInSession >= 3)
-   {
       g_asianRangeReady = true;
-      if(DebugMode) Print("Asian range: H=", g_asianHigh, " L=", g_asianLow, " bars=", barsInSession);
-   }
 }
 
 //+------------------------------------------------------------------+
-//| Detect session-specific levels                                   |
+//| Detect session levels                                            |
 //+------------------------------------------------------------------+
 void DetectSessionLevels()
 {
    SessionType sess = GetCurrentSession();
 
-   //--- Track Asian range if we're in or near Asian session
    if(sess == SESS_ASIAN || sess == SESS_LONDON)
    {
-      // Check if we just entered a new Asian session window
-      int hourGMT   = GetGMTHour();
+      int hourGMT = GetGMTHour();
       int minuteGMT = GetGMTMin();
-
       bool asianOngoing = false;
       if((hourGMT == Asian_StartH && minuteGMT >= Asian_StartM) ||
          (hourGMT > Asian_StartH && hourGMT < Asian_EndH) ||
          (hourGMT == Asian_EndH && minuteGMT <= Asian_EndM))
          asianOngoing = true;
 
-      // Track once at end of Asian session
       if(!asianOngoing && g_asianSessionStart > 0)
       {
          TrackAsianRange();
          g_asianSessionStart = 0;
       }
-
       if(asianOngoing && g_asianSessionStart == 0)
       {
-         MqlDateTime asianDt; TimeTradeServer(asianDt); g_asianSessionStart = StructToTime(asianDt);
+         MqlDateTime asianDt;
+         TimeTradeServer(asianDt);
+         g_asianSessionStart = StructToTime(asianDt);
          g_asianHigh = 0;
-         g_asianLow = 1e9;
+         g_asianLow  = 1e9;
          g_asianRangeReady = false;
       }
-   }
-
-   //--- Detect FVGs for NY session
-   if(sess == SESS_NY || sess == SESS_LONDON)
-   {
-      DetectFVG();
-   }
-
-   //--- Detect liquidity levels for NY session
-   if(sess == SESS_NY)
-   {
-      MqlRates rates[];
-      ArraySetAsSeries(rates, true);
-      if(CopyRates(_Symbol, EntryTF, 0, SweepLookback + 5, rates) >= SweepLookback)
-         DetectLiquidityLevels(rates);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Get current GMT hour from trade server time                      |
+//| Update swing points                                              |
+//+------------------------------------------------------------------+
+void UpdateSwingPoints()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, EntryTF, 0, SwingLookback, rates) < 50) return;
+   // Swing points are used for Asian range detection only now
+}
+
+//+------------------------------------------------------------------+
+//| Utility functions                                                |
 //+------------------------------------------------------------------+
 int GetGMTHour()
 {
@@ -1316,24 +921,19 @@ int GetGMTMin()
    return dt.min;
 }
 
-//+------------------------------------------------------------------+
-//| Get current session based on GMT time                            |
-//+------------------------------------------------------------------+
 SessionType GetCurrentSession()
 {
-   int hourGMT   = GetGMTHour();
+   int hourGMT = GetGMTHour();
    int minuteGMT = GetGMTMin();
-
    int timeMinutes = hourGMT * 60 + minuteGMT;
 
-   int asianStart = Asian_StartH * 60 + Asian_StartM;
-   int asianEnd   = Asian_EndH   * 60 + Asian_EndM;
+   int asianStart  = Asian_StartH  * 60 + Asian_StartM;
+   int asianEnd    = Asian_EndH    * 60 + Asian_EndM;
    int londonStart = London_StartH * 60 + London_StartM;
    int londonEnd   = London_EndH   * 60 + London_EndM;
-   int nyStart    = NY_StartH    * 60 + NY_StartM;
-   int nyEnd      = NY_EndH      * 60 + NY_EndM;
+   int nyStart     = NY_StartH     * 60 + NY_StartM;
+   int nyEnd       = NY_EndH       * 60 + NY_EndM;
 
-   //--- Handle overnight sessions
    if(asianEnd < asianStart) asianEnd += 1440;
    if(nyEnd < nyStart) nyEnd += 1440;
 
@@ -1352,9 +952,6 @@ SessionType GetCurrentSession()
    return SESS_NONE;
 }
 
-//+------------------------------------------------------------------+
-//| Get session name string                                          |
-//+------------------------------------------------------------------+
 string GetSessionName(SessionType s)
 {
    switch(s)
@@ -1366,57 +963,11 @@ string GetSessionName(SessionType s)
    }
 }
 
-//+------------------------------------------------------------------+
-//| Update swing points from price action                            |
-//+------------------------------------------------------------------+
-void UpdateSwingPoints()
-{
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, EntryTF, 0, SwingLookback, rates) < 50) return;
-
-   ArrayResize(g_swingHighIdx, 0);
-   ArrayResize(g_swingHighVal, 0);
-   ArrayResize(g_swingLowIdx, 0);
-   ArrayResize(g_swingLowVal, 0);
-
-   int lookback = MathMin(SwingLookback, ArraySize(rates) - 2);
-
-   for(int i = 2; i < lookback; i++)
-   {
-      //--- Swing high: bar i is higher than i-1 and i+1
-      if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
-      {
-         int idx = ArraySize(g_swingHighIdx);
-         ArrayResize(g_swingHighIdx, idx + 1);
-         ArrayResize(g_swingHighVal, idx + 1);
-         g_swingHighIdx[idx] = i;
-         g_swingHighVal[idx] = rates[i].high;
-      }
-
-      //--- Swing low: bar i is lower than i-1 and i+1
-      if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
-      {
-         int idx = ArraySize(g_swingLowIdx);
-         ArrayResize(g_swingLowIdx, idx + 1);
-         ArrayResize(g_swingLowVal, idx + 1);
-         g_swingLowIdx[idx] = i;
-         g_swingLowVal[idx] = rates[i].low;
-      }
-   }
-
-   g_swingReady = (ArraySize(g_swingHighIdx) > 0 && ArraySize(g_swingLowIdx) > 0);
-}
-
-//+------------------------------------------------------------------+
-//| Calculate ATR                                                     |
-//+------------------------------------------------------------------+
 double CalcATR(int period, ENUM_TIMEFRAMES tf)
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, tf, 0, period + 1, rates) < period + 1) return 0;
-
    double sum = 0;
    for(int i = 1; i <= period; i++)
    {
@@ -1429,15 +980,11 @@ double CalcATR(int period, ENUM_TIMEFRAMES tf)
    return sum / period;
 }
 
-//+------------------------------------------------------------------+
-//| Is new bar?                                                      |
-//+------------------------------------------------------------------+
 bool IsNewBar()
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, EntryTF, 0, 1, rates) < 1) return false;
-
    if(rates[0].time != g_lastBarTime)
    {
       g_lastBarTime = rates[0].time;
@@ -1446,9 +993,6 @@ bool IsNewBar()
    return false;
 }
 
-//+------------------------------------------------------------------+
-//| Daily reset                                                      |
-//+------------------------------------------------------------------+
 void ResetDaily()
 {
    MqlDateTime dt;
@@ -1465,23 +1009,23 @@ void ResetDaily()
       g_stats.lastSession = SESS_NONE;
       g_asianSessionStart = 0;
       g_asianRangeReady = false;
+      g_frvpRefreshCounter = FRVP_RefreshBars; // force recompute
       Print("--- Daily reset. Balance: ", g_stats.startingBalance, " ---");
    }
 
-   //--- Check daily loss limit
    if(!g_stats.tradingStopped && g_stats.startingBalance > 0)
    {
       double ddPct = (g_stats.startingBalance - m_account.Equity()) / g_stats.startingBalance * 100.0;
       if(ddPct >= MaxDailyRiskPct)
       {
          g_stats.tradingStopped = true;
-         Print("*** MAX DAILY LOSS REACHED: ", DoubleToString(ddPct, 2), "% ***");
+         Print("*** MAX DAILY LOSS: ", DoubleToString(ddPct, 2), "% ***");
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Manage open positions (partial TP, trailing, break-even)         |
+//| Position management                                              |
 //+------------------------------------------------------------------+
 void ManagePositions()
 {
@@ -1497,10 +1041,6 @@ void ManagePositions()
       if(!PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      //--- Gainz-Swing positions keep their hard SL/TP: managed by
-      //--- ManageGainzPositions() (max-hold + no-overnight), not the scalp
-      //--- break-even/trailing.
-      if(StringFind(PositionGetString(POSITION_COMMENT), "_G_") >= 0) continue;
 
       double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl    = PositionGetDouble(POSITION_SL);
@@ -1510,14 +1050,9 @@ void ManagePositions()
                         SymbolInfoDouble(_Symbol, SYMBOL_BID) :
                         SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-      //--- Trend-leg trades (_T_ tag) ride wider: BE later + wide trail
-      bool isTrend = (StringFind(PositionGetString(POSITION_COMMENT), "_T_") >= 0);
-
-      //--- Break-even
       if(UseBreakEven)
       {
-         double beDist = isTrend ? Trend_TrailStart_ATR * g_atrValue
-                                 : BE_ATR_Mult * g_atrValue;
+         double beDist = BE_ATR_Mult * g_atrValue;
          if(type == POSITION_TYPE_BUY)
          {
             if(curPrice >= entry + beDist && sl < entry)
@@ -1530,13 +1065,10 @@ void ManagePositions()
          }
       }
 
-      //--- Trailing stop
       if(UseTrailing)
       {
-         double trailStart = isTrend ? Trend_TrailStart_ATR * g_atrValue
-                                     : TrailStart_ATR * g_atrValue;
-         double trailStep  = isTrend ? Trend_TrailStep_ATR * g_atrValue
-                                     : TrailStep_ATR * g_atrValue;
+         double trailStart = TrailStart_ATR * g_atrValue;
+         double trailStep  = TrailStep_ATR * g_atrValue;
 
          if(type == POSITION_TYPE_BUY)
          {
@@ -1544,8 +1076,7 @@ void ManagePositions()
             if(profitDist >= trailStart)
             {
                double newSL = NormalizeDouble(curPrice - trailStep, digits);
-               if(newSL > sl + point)
-                  ModifySL(ticket, newSL);
+               if(newSL > sl + point) ModifySL(ticket, newSL);
             }
          }
          else
@@ -1554,17 +1085,13 @@ void ManagePositions()
             if(profitDist >= trailStart)
             {
                double newSL = NormalizeDouble(curPrice + trailStep, digits);
-               if(newSL < sl - point || sl == 0)
-                  ModifySL(ticket, newSL);
+               if(newSL < sl - point || sl == 0) ModifySL(ticket, newSL);
             }
          }
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| Count open positions for this symbol/magic                       |
-//+------------------------------------------------------------------+
 int CountOpenPositions()
 {
    int count = 0;
@@ -1579,9 +1106,6 @@ int CountOpenPositions()
    return count;
 }
 
-//+------------------------------------------------------------------+
-//| Close all positions for this symbol/magic                        |
-//+------------------------------------------------------------------+
 void CloseAllPositions(string reason)
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -1610,21 +1134,13 @@ void CloseAllPositions(string reason)
       req.magic = MagicNumber;
       req.type_filling = g_fillMode;
       if(!OrderSend(req, res))
-      {
-         if(DebugMode) Print("CloseAll: OrderSend failed, err=", GetLastError());
-      }
+         if(DebugMode) Print("CloseAll: failed, err=", GetLastError());
    }
 }
 
-//+------------------------------------------------------------------+
-//| Calculate lot size based on risk % and SL distance               |
-//+------------------------------------------------------------------+
 double CalcLotSizeRisk(double slDist, double riskPct)
 {
    if(slDist <= 0) return 0;
-
-   //--- Floor pathologically tiny SL distances (sweep entry at the level) so
-   //--- risk-based sizing can't explode into 1000+ oz positions.
    if(g_atrValue > 0 && slDist < Min_SL_ATR * g_atrValue) slDist = Min_SL_ATR * g_atrValue;
 
    double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -1636,12 +1152,9 @@ double CalcLotSizeRisk(double slDist, double riskPct)
    double lot = riskAmount / (slTicks * tickVal);
    lot = NormalizeDouble(lot, 2);
 
-   //--- Round down to broker volume step (keeps lot on valid grid)
    double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    if(vstep > 0) lot = MathFloor(lot / vstep + 1e-9) * vstep;
 
-   //--- Notional cap: ~$30k exposure per $10k balance (~7 oz at current gold).
-   //--- Stops margin blow-ups from oversized positions (e.g. the 2465-oz NoMoney order).
    double maxVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(price > 0)
@@ -1651,35 +1164,27 @@ double CalcLotSizeRisk(double slDist, double riskPct)
    }
    if(vstep > 0) maxVol = MathFloor(maxVol / vstep) * vstep;
 
-   //--- Clamp
    double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    return MathMax(minVol, MathMin(lot, maxVol));
 }
 
-//+------------------------------------------------------------------+
-//| Verify trade before sending                                      |
-//+------------------------------------------------------------------+
 bool VerifyTrade(int type, double price, double sl, double tp, double lot)
 {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
-   //--- Normalize prices
    price = NormalizeDouble(price, digits);
    sl    = NormalizeDouble(sl, digits);
    tp    = NormalizeDouble(tp, digits);
 
-   //--- Basic validation
    if(lot <= 0) return false;
    if(type == ORDER_TYPE_BUY && price < bid * 0.99) return false;
    if(type == ORDER_TYPE_SELL && price > ask * 1.01) return false;
 
-   //--- SL/TP must be on correct side (tp==0 = no take-profit, allowed for the trend leg)
    if(type == ORDER_TYPE_BUY) { if(sl >= price) return false; if(tp > 0 && tp <= price) return false; }
    if(type == ORDER_TYPE_SELL) { if(sl <= price) return false; if(tp > 0 && tp >= price) return false; }
 
-   //--- SL/TP distance checks
    double slPips = MathAbs(price - sl);
    double tpPips = MathAbs(tp - price);
    double minDist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -1690,13 +1195,8 @@ bool VerifyTrade(int type, double price, double sl, double tp, double lot)
    return true;
 }
 
-//+------------------------------------------------------------------+
-//| Open a market order                                              |
-//+------------------------------------------------------------------+
-bool OpenOrder(int type, double volume, double price, double sl, double tp,
-               string comment)
+bool OpenOrder(int type, double volume, double price, double sl, double tp, string comment)
 {
-   //--- Normalize to symbol digits (prevents "Invalid request" errors)
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    price = NormalizeDouble(price, digits);
    sl    = NormalizeDouble(sl, digits);
@@ -1704,253 +1204,34 @@ bool OpenOrder(int type, double volume, double price, double sl, double tp,
 
    if(!m_trade.PositionOpen(_Symbol, (ENUM_ORDER_TYPE)type, volume, price, sl, tp, comment))
    {
-      int err = GetLastError();
-      Print("ORDER FAILED: ", comment, " err=", err, " vol=", volume,
+      Print("ORDER FAILED: ", comment, " err=", GetLastError(), " vol=", volume,
             " price=", price, " sl=", sl, " tp=", tp);
       return false;
    }
-   Print("ORDER OK: ", comment, " vol=", volume, " price=", price,
-         " sl=", sl, " tp=", tp);
+   Print("ORDER OK: ", comment, " vol=", volume, " price=", price, " sl=", sl, " tp=", tp);
    return true;
 }
 
-//+------------------------------------------------------------------+
-//| Modify SL                                                        |
-//+------------------------------------------------------------------+
 void ModifySL(ulong ticket, double newSL)
 {
    if(PositionSelectByTicket(ticket))
    {
       double currentSL = PositionGetDouble(POSITION_SL);
-      if(MathAbs(newSL - currentSL) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2)
-         return;
-
+      if(MathAbs(newSL - currentSL) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2) return;
       double tp = PositionGetDouble(POSITION_TP);
       m_trade.PositionModify(ticket, newSL, tp);
    }
 }
 
 //+------------------------------------------------------------------+
-//| GAINZ-SWING MODE                                                 |
-//| Swing profile: TP +159p / SL -322p (pips = point, 0.01 for gold),|
-//| breakout of the previous day's range with EMA trend bias,        |
-//| session-gated (default London+NY 07-21 GMT), max 11h hold, hard  |
-//| SL, no overnight. One position at a time. Port of ScalpXAU_cBot.|
-//+------------------------------------------------------------------+
-bool InGainzSessionWindow()
-{
-   int t = GetGMTHour() * 60 + GetGMTMin();
-   int start = Gainz_StartH * 60;
-   int end   = Gainz_EndH * 60;
-   if(end < start) end += 1440;
-   if(t < start) t += 1440;
-   return (t >= start && t <= end);
-}
-
-//+------------------------------------------------------------------+
-//| Count open Gainz positions (this symbol/magic, _G_ tag)          |
-//+------------------------------------------------------------------+
-int CountGainzPositions()
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      if(StringFind(PositionGetString(POSITION_COMMENT), "_G_") < 0) continue;
-      count++;
-   }
-   return count;
-}
-
-//+------------------------------------------------------------------+
-//| Gainz trend filter: EMA on H1 at the last CLOSED bar             |
-//+------------------------------------------------------------------+
-double GetGainzEMA()
-{
-   if(hGainzEMA == INVALID_HANDLE) return 0;
-   if(BarsCalculated(hGainzEMA) < Gainz_EMA_Period + 2) return 0;
-   double buf[];
-   ArraySetAsSeries(buf, true);
-   if(CopyBuffer(hGainzEMA, 0, 0, 3, buf) < 3) return 0;
-   return buf[1]; // 0 = forming bar, 1 = last closed
-}
-
-//+------------------------------------------------------------------+
-//| Gainz-Swing entry: previous-day range breakout + EMA bias        |
-//+------------------------------------------------------------------+
-void CheckGainzEntry()
-{
-   if(!EnableGainzSwing) return;
-   if(hGainzEMA == INVALID_HANDLE) return;
-
-   //--- One attempt per H1 bar
-   datetime barTime = iTime(_Symbol, PERIOD_H1, 0);
-   if(barTime == g_lastGainzEntryBarTime) return;
-   g_lastGainzEntryBarTime = barTime;
-
-   //--- Cooldown after a Gainz exit
-   if(TimeCurrent() < g_gainzNextEntryAllowed) return;
-
-   //--- Shared guards
-   if(g_stats.tradingStopped || g_stats.sessTradingStopped) return;
-   if(g_stats.sessionTradeCount >= MaxTradesPerSess) return;
-   if(CountOpenPositions() >= MaxPositions) return;
-   if(CountGainzPositions() > 0) return; // one swing position at a time
-
-   //--- Session window
-   if(!InGainzSessionWindow()) return;
-
-   //--- Signal on the last CLOSED H1 bar:
-   //    long  = close > prev-day high AND close > EMA
-   //    short = close < prev-day low  AND close < EMA
-   double ema = GetGainzEMA();
-   if(ema <= 0) return;
-   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
-   double prevLow  = iLow(_Symbol, PERIOD_D1, 1);
-   if(prevHigh <= 0 || prevLow >= 1e8) return;
-   double close = iClose(_Symbol, PERIOD_H1, 1);
-   if(close <= 0) return;
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT); // gold: 0.01
-   double tpPips = Gainz_TP_Pips * pip;
-   double slPips = Gainz_SL_Pips * pip;
-
-   if(close > prevHigh && close > ema)
-   {
-      double sl = ask - slPips;
-      double tp = ask + tpPips;
-      double lot = CalcLotSizeRisk(slPips, Gainz_RiskPct);
-      if(lot <= 0) return;
-      if(!VerifyTrade(ORDER_TYPE_BUY, ask, sl, tp, lot)) return;
-      if(OpenOrder(ORDER_TYPE_BUY, lot, ask, sl, tp, CommentPrefix + "_G_BUY"))
-      {
-         g_stats.tradeCount++;
-         g_stats.sessionTradeCount++;
-         if(DebugMode) Print("GAINZ BUY: close=", close, " prevHigh=", prevHigh, " EMA=", ema);
-      }
-   }
-   else if(close < prevLow && close < ema)
-   {
-      double sl = bid + slPips;
-      double tp = bid - tpPips;
-      double lot = CalcLotSizeRisk(slPips, Gainz_RiskPct);
-      if(lot <= 0) return;
-      if(!VerifyTrade(ORDER_TYPE_SELL, bid, sl, tp, lot)) return;
-      if(OpenOrder(ORDER_TYPE_SELL, lot, bid, sl, tp, CommentPrefix + "_G_SELL"))
-      {
-         g_stats.tradeCount++;
-         g_stats.sessionTradeCount++;
-         if(DebugMode) Print("GAINZ SELL: close=", close, " prevLow=", prevLow, " EMA=", ema);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Gainz-Swing position management: max hold + no-overnight close   |
-//+------------------------------------------------------------------+
-bool CloseGainzPosition(ulong ticket, string reason)
-{
-   if(!PositionSelectByTicket(ticket)) return false;
-   int type = (int)PositionGetInteger(POSITION_TYPE);
-   int orderType = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   double price = (type == POSITION_TYPE_BUY) ?
-                  SymbolInfoDouble(_Symbol, SYMBOL_BID) :
-                  SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
-   req.action = TRADE_ACTION_DEAL;
-   req.position = ticket;
-   req.symbol = _Symbol;
-   req.volume = PositionGetDouble(POSITION_VOLUME);
-   req.type = (ENUM_ORDER_TYPE)orderType;
-   req.price = price;
-   req.deviation = MaxSlippagePts;
-   req.comment = reason;
-   req.magic = MagicNumber;
-   req.type_filling = g_fillMode;
-   if(OrderSend(req, res))
-   {
-      if(DebugMode) Print("GAINZ CLOSE (", reason, ") ticket=", ticket);
-      return true;
-   }
-   if(DebugMode) Print("GAINZ CLOSE FAILED: ", GetLastError());
-   return false;
-}
-
-void ManageGainzPositions()
-{
-   if(!EnableGainzSwing) return;
-   bool pastCutoff = Gainz_NoOvernight && (GetGMTHour() >= Gainz_CutoffHour);
-
-   ulong live[];
-   int liveCount = 0;
-
-   //--- Pass 1: close on max-hold / no-overnight cutoff; snapshot survivors
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      if(StringFind(PositionGetString(POSITION_COMMENT), "_G_") < 0) continue;
-
-      string reason = "";
-      datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
-      if(opened > 0 && TimeCurrent() - opened >= Gainz_MaxHoldHours * 3600)
-         reason = "MAX_HOLD";
-      if(reason == "" && pastCutoff)
-         reason = "CUTOFF_NO_OVERNIGHT";
-
-      if(reason != "")
-      {
-         if(CloseGainzPosition(ticket, reason))
-            g_gainzNextEntryAllowed = TimeCurrent() + Gainz_CooldownHours * 3600;
-      }
-      else
-      {
-         int n = ArraySize(live);
-         ArrayResize(live, n + 1);
-         live[n] = ticket;
-         liveCount++;
-      }
-   }
-
-   //--- Pass 2: tickets that vanished on their own (TP/SL hit) -> cooldown
-   for(int i = 0; i < g_gainzTicketCount; i++)
-   {
-      bool stillOpen = false;
-      for(int j = 0; j < liveCount; j++)
-         if(live[j] == g_gainzTickets[i]) { stillOpen = true; break; }
-      if(!stillOpen)
-         g_gainzNextEntryAllowed = TimeCurrent() + Gainz_CooldownHours * 3600;
-   }
-
-   //--- Pass 3: snapshot live list
-   ArrayResize(g_gainzTickets, liveCount);
-   for(int i = 0; i < liveCount; i++) g_gainzTickets[i] = live[i];
-   g_gainzTicketCount = liveCount;
-}
-
-//+------------------------------------------------------------------+
 //| Chart comment                                                    |
 //+------------------------------------------------------------------+
-string RepeatStr(string s, int n)
-{
-   string r = "";
-   for(int i = 0; i < n; i++) r += s;
-   return r;
-}
+string RepeatStr(string s, int n) { string r = ""; for(int i = 0; i < n; i++) r += s; return r; }
 
 void UpdateComment()
 {
    string sep = "\n" + RepeatStr("-", 30) + "\n";
-   string info = "=== ScalpXAU v1.0 ===" + sep;
+   string info = "=== ScalpXAU v3.0 FRVP ===" + sep;
    info += "Symbol: " + _Symbol + " | TF: " + EnumToString(EntryTF) + "\n";
    info += "Balance: $" + DoubleToString(m_account.Balance(), 2);
    info += " | Equity: $" + DoubleToString(m_account.Equity(), 2);
@@ -1961,29 +1242,43 @@ void UpdateComment()
       dd = (g_stats.startingBalance - m_account.Equity()) / g_stats.startingBalance * 100.0;
    info += "Today: " + IntegerToString(g_stats.tradeCount);
    info += " | Session: " + IntegerToString(g_stats.sessionTradeCount) + "/" + IntegerToString(MaxTradesPerSess);
-   info += " | DD: " + DoubleToString(dd, 2) + "% (limit: " + DoubleToString(MaxDailyRiskPct, 1) + "%)" + sep;
+   info += " | DD: " + DoubleToString(dd, 2) + "%" + sep;
 
-   info += "Session: " + GetSessionName(g_currentSession) + " (GMT";
-   if(g_brokerGMTOffset != 0) info += (g_brokerGMTOffset > 0 ? "+" : "") + IntegerToString(g_brokerGMTOffset);
-   info += ")" + "\n";
-
+   info += "Session: " + GetSessionName(g_currentSession) + "\n";
    if(g_asianRangeReady)
       info += "Asian Range: H=" + DoubleToString(g_asianHigh, 2) + " L=" + DoubleToString(g_asianLow, 2) + "\n";
 
-   info += "FVG: " + IntegerToString(g_fvgCount) + " | LiqLevels: " + IntegerToString(g_liqCount) + "\n";
-   info += "ATR(14): " + DoubleToString(g_atrValue, 1) + " | Swings: " + IntegerToString(ArraySize(g_swingHighIdx)) + "H/" + IntegerToString(ArraySize(g_swingLowIdx)) + "L" + "\n";
-   info += "Open: " + IntegerToString(CountOpenPositions()) + sep;
+   //--- FRVP info
+   if(g_frvp.current.valid)
+   {
+      info += "FRVP: POC=" + DoubleToString(g_frvp.current.poc, 2);
+      info += " VAH=" + DoubleToString(g_frvp.current.vah, 2);
+      info += " VAL=" + DoubleToString(g_frvp.current.val, 2);
+      info += " Zones=" + IntegerToString(g_frvp.current.zoneCount) + "\n";
+   }
+   else
+   {
+      info += "FRVP: computing...\n";
+   }
 
-   info += "Asian " + (EnableAsian ? "ON" : "OFF");
-   info += " | London " + (EnableLondon ? "ON" : "OFF");
-   info += " | NY " + (EnableNY ? "ON" : "OFF");
-   info += " | Gainz " + (EnableGainzSwing ? "ON" : "OFF") + "\n";
+   //--- S/R info
+   if(EnableSR && g_sr.current.valid)
+   {
+      info += "S/R: S=" + IntegerToString(g_sr.current.supportCount);
+      info += " R=" + IntegerToString(g_sr.current.resistanceCount);
+      if(g_sr.current.supportCount > 0)
+         info += " nearestS=" + DoubleToString(g_sr.current.supports[0].price, 2);
+      if(g_sr.current.resistanceCount > 0)
+         info += " nearestR=" + DoubleToString(g_sr.current.resistances[0].price, 2);
+      info += "\n";
+   }
+
+   info += "ATR(14): " + DoubleToString(g_atrValue, 1) + "\n";
+   info += "Open: " + IntegerToString(CountOpenPositions()) + sep;
    info += "Trailing: " + (UseTrailing ? "ON" : "OFF") + " | BE: " + (UseBreakEven ? "ON" : "OFF") + "\n";
 
-   if(g_stats.tradingStopped)
-      info += "*** TRADING STOPPED (daily loss limit) ***\n";
-   if(g_stats.sessTradingStopped)
-      info += "*** SESSION STOPPED (session DD limit) ***\n";
+   if(g_stats.tradingStopped) info += "*** TRADING STOPPED (daily loss limit) ***\n";
+   if(g_stats.sessTradingStopped) info += "*** SESSION STOPPED (session DD limit) ***\n";
 
    Comment(info);
 }

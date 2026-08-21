@@ -48,10 +48,10 @@
 
 
 
-#include "FixedRangeVolumeProfile.mqh"
+#include <FixedRangeVolumeProfile.mqh>
 
-#include "PriceActionPatterns.mqh"
-#include "SupportResistance.mqh"
+#include <PriceActionPatterns.mqh>
+#include <SupportResistance.mqh>
 
 
 
@@ -1645,7 +1645,7 @@ int CalcConfluenceBuy(SymbolState &st, double atrM5, double atrM15)
 
       {
 
-         FRVPResult &prof = g_frvpStates[si].current;
+         FRVPResult prof = g_frvpStates[si].current;
 
          double bid = SymbolInfoDouble(st.name, SYMBOL_BID);
 
@@ -1785,7 +1785,7 @@ int CalcConfluenceSell(SymbolState &st, double atrM5, double atrM15)
 
       {
 
-         FRVPResult &prof = g_frvpStates[si].current;
+         FRVPResult prof = g_frvpStates[si].current;
 
          double ask = SymbolInfoDouble(st.name, SYMBOL_ASK);
 

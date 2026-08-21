@@ -18,9 +18,9 @@
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
 #include <Trade/AccountInfo.mqh>
-#include "FixedRangeVolumeProfile.mqh"
-#include "PriceActionPatterns.mqh"
-#include "SupportResistance.mqh"
+#include <FixedRangeVolumeProfile.mqh>
+#include <PriceActionPatterns.mqh>
+#include <SupportResistance.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -416,7 +416,7 @@ void CheckAsianEntry(int trendDir)
    if(atr <= 0) return;
 
    double zoneTol = atr * FRVP_ZoneTolATR;
-   FRVPResult &prof = g_frvp.current;
+   FRVPResult prof = g_frvp.current;
 
    //--- Get price action on last 2 closed bars
    PASignal pa = PA_AggregateScore(rates, 5, atr,
@@ -484,7 +484,7 @@ void CheckLondonEntry(int trendDir)
    double atr = g_atrValue;
    if(atr <= 0) return;
 
-   FRVPResult &prof = g_frvp.current;
+   FRVPResult prof = g_frvp.current;
    double zoneTol = atr * FRVP_ZoneTolATR;
 
    //--- Detect breakout from Asian range
@@ -575,7 +575,7 @@ void CheckNYEntry(int trendDir)
    double atr = g_atrValue;
    if(atr <= 0) return;
 
-   FRVPResult &prof = g_frvp.current;
+   FRVPResult prof = g_frvp.current;
    double zoneTol = atr * FRVP_ZoneTolATR;
 
    //--- Detect sweep: wick above/below recent high/low with rejection
@@ -699,7 +699,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
    if(slDist < Min_SL_ATR * atr) slDist = Min_SL_ATR * atr;
 
    double tpDist = atr * 2.0;
-   FRVPResult &prof = g_frvp.current;
+   FRVPResult prof = g_frvp.current;
 
    if(orderType == ORDER_TYPE_BUY)
    {
