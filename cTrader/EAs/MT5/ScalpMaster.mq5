@@ -92,39 +92,9 @@ SRLevel g_srLevels[];
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   //--- Auto-detect symbol with broker suffix
-   g_symbol = InpSymbol;
-   if(g_symbol == "" || g_symbol == "0") g_symbol = _Symbol;
-   if(SymbolSelect(g_symbol, true) == 0)
-   {
-      string base = g_symbol;
-      int pos = StringFind(base, "+");
-      if(pos >= 0) base = StringSubstr(base, 0, pos);
-      pos = StringFind(base, ".pc");
-      if(pos >= 0) base = StringSubstr(base, 0, pos);
-      string sfx[] = {"+", ".pc", "", "_"};
-      bool found = false;
-      for(int s = 0; s < ArraySize(sfx); s++)
-      {
-         string trySym = base + sfx[s];
-         if(trySym != "" && SymbolSelect(trySym, true) != 0)
-         {
-            g_symbol = trySym;
-            found = true;
-            Print("SM Auto-detected symbol: ", g_symbol);
-            break;
-         }
-      }
-      if(!found)
-      {
-         Print("SM ERROR: Cannot find symbol for ", InpSymbol);
-         return INIT_FAILED;
-      }
-   }
-   else
-   {
-      Print("SM Symbol OK: ", g_symbol);
-   }
+   //--- Use chart symbol directly (EA is already on the right chart)
+   g_symbol = _Symbol;
+   Print("SM Initialized on ", g_symbol);
 
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(30);
