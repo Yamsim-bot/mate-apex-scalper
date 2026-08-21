@@ -14,7 +14,7 @@
 //| Inputs                                                            |
 //+------------------------------------------------------------------+
 input group "=== General ==="
-input string   InpSymbol       = "XAUUSD";       // Symbol (XAUUSD or XAGUSD)
+input string   InpSymbol       = "";             // Symbol (blank = use chart symbol)
 input ENUM_TIMEFRAMES InpTF    = PERIOD_M5;       // Timeframe
 input int      InpMagic        = 777777;          // Magic Number
 input double   InpRiskPct      = 0.5;             // Risk per trade (%)
@@ -51,6 +51,8 @@ input int      InpNYEnd        = 21;              // NY End
 input int      InpGMTOffset    = 3;               // Broker GMT Offset
 
 input group "=== Filters ==="
+
+string g_symbol = "";
 input bool     InpUseSpreadFilter = true;          // Max spread filter
 input int      InpMaxSpread    = 30;              // Max spread (points)
 input bool     InpUseATRFilter = true;             // Min ATR filter
@@ -90,18 +92,38 @@ SRLevel g_srLevels[];
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Validate symbol
-   if(StringFind(InpSymbol, "XAU") < 0 && StringFind(InpSymbol, "XAG") < 0 &&
-      StringFind(InpSymbol, "GOLD") < 0 && StringFind(InpSymbol, "SILVER") < 0)
+   //--- Auto-detect symbol with broker suffix
+   g_symbol = InpSymbol;
+   if(g_symbol == "" || g_symbol == "0") g_symbol = _Symbol;
+   if(SymbolSelect(g_symbol, true) == 0)
    {
-      Print("WARNING: ", InpSymbol, " is not XAU or XAG. Proceeding anyway.");
+      string base = g_symbol;
+      int pos = StringFind(base, "+");
+      if(pos >= 0) base = StringSubstr(base, 0, pos);
+      pos = StringFind(base, ".pc");
+      if(pos >= 0) base = StringSubstr(base, 0, pos);
+      string sfx[] = {"+", ".pc", "", "_"};
+      bool found = false;
+      for(int s = 0; s < ArraySize(sfx); s++)
+      {
+         string trySym = base + sfx[s];
+         if(trySym != "" && SymbolSelect(trySym, true) != 0)
+         {
+            g_symbol = trySym;
+            found = true;
+            Print("SM Auto-detected symbol: ", g_symbol);
+            break;
+         }
+      }
+      if(!found)
+      {
+         Print("SM ERROR: Cannot find symbol for ", InpSymbol);
+         return INIT_FAILED;
+      }
    }
-
-   // Verify symbol exists
-   if(SymbolSelect(InpSymbol, true) == 0)
+   else
    {
-      Print("ERROR: Symbol ", InpSymbol, " not found");
-      return INIT_FAILED;
+      Print("SM Symbol OK: ", g_symbol);
    }
 
    trade.SetExpertMagicNumber(InpMagic);
@@ -109,12 +131,12 @@ int OnInit()
    trade.SetTypeFilling(ORDER_FILLING_IOC);
 
    // Indicators
-   handleRSI = iRSI(InpSymbol, InpRSI_TF, InpRSI_Period, PRICE_CLOSE);
-   handleATR = iATR(InpSymbol, InpTF, 14);
+   handleRSI = iRSI(g_symbol, InpRSI_TF, InpRSI_Period, PRICE_CLOSE);
+   handleATR = iATR(g_symbol, InpTF, 14);
 
    if(handleRSI == INVALID_HANDLE || handleATR == INVALID_HANDLE)
    {
-      Print("ERROR: Failed to create indicator handles");
+      Print("SM ERROR: Failed to create indicator handles");
       return INIT_FAILED;
    }
 
@@ -128,7 +150,7 @@ int OnInit()
    g_currentSession = SESS_NONE;
    g_lastSession   = SESS_NONE;
 
-   Print("ScalpMaster initialized on ", InpSymbol, " ", EnumToString(InpTF),
+   Print("ScalpMaster initialized on ", g_symbol, " ", EnumToString(InpTF),
          " | Risk=", InpRiskPct, "% | Magic=", InpMagic);
 
    return INIT_SUCCEEDED;
@@ -163,7 +185,7 @@ void OnTick()
    }
 
    // New bar check
-   datetime barTime = iTime(InpSymbol, InpTF, 0);
+   datetime barTime = iTime(g_symbol, InpTF, 0);
    bool newBar = (barTime != g_lastBarTime);
    if(newBar) g_lastBarTime = barTime;
 
@@ -250,8 +272,8 @@ void ScanSR()
    double highs[], lows[];
    int bars = InpSR_Lookback + InpSR_SwingLen + 5;
 
-   if(CopyHigh(InpSymbol, InpTF, 0, bars, highs) < bars) return;
-   if(CopyLow(InpSymbol, InpTF, 0, bars, lows) < bars) return;
+   if(CopyHigh(g_symbol, InpTF, 0, bars, highs) < bars) return;
+   if(CopyLow(g_symbol, InpTF, 0, bars, lows) < bars) return;
 
    // Find swing highs and lows
    for(int i = InpSR_SwingLen; i < bars - InpSR_SwingLen; i++)
@@ -362,7 +384,7 @@ double NearestResistance(double price)
 void CheckEntry()
 {
    // One entry per bar
-   if(g_lastEntryBar == iTime(InpSymbol, InpTF, 0)) return;
+   if(g_lastEntryBar == iTime(g_symbol, InpTF, 0)) return;
 
    // Session gate
    if(g_currentSession == SESS_NONE) return;
@@ -370,7 +392,7 @@ void CheckEntry()
    // Spread filter
    if(InpUseSpreadFilter)
    {
-      long spread = SymbolInfoInteger(InpSymbol, SYMBOL_SPREAD);
+      long spread = SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
       if(spread > InpMaxSpread) return;
    }
 
@@ -384,15 +406,15 @@ void CheckEntry()
    double rsi1 = rsiBuf[1]; // bar 2
 
    // Get price data
-   double open1  = iOpen(InpSymbol, InpTF, 1);
-   double close1 = iClose(InpSymbol, InpTF, 1);
-   double high1  = iHigh(InpSymbol, InpTF, 1);
-   double low1   = iLow(InpSymbol, InpTF, 1);
-   double open0  = iOpen(InpSymbol, InpTF, 0);
-   double close0 = iClose(InpSymbol, InpTF, 0);
+   double open1  = iOpen(g_symbol, InpTF, 1);
+   double close1 = iClose(g_symbol, InpTF, 1);
+   double high1  = iHigh(g_symbol, InpTF, 1);
+   double low1   = iLow(g_symbol, InpTF, 1);
+   double open0  = iOpen(g_symbol, InpTF, 0);
+   double close0 = iClose(g_symbol, InpTF, 0);
 
-   double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
 
    bool isBull = close1 > open1;
    bool isBear = close1 < open1;
@@ -406,8 +428,8 @@ void CheckEntry()
    bool bearPinBar = isBear && upperWick > body * 2.0 && lowerWick < body * 0.5;
 
    // --- Engulfing detection ---
-   double prevClose = iClose(InpSymbol, InpTF, 2);
-   double prevOpen  = iOpen(InpSymbol, InpTF, 2);
+   double prevClose = iClose(g_symbol, InpTF, 2);
+   double prevOpen  = iOpen(g_symbol, InpTF, 2);
    bool bullEngulf = isBull && prevClose < prevOpen && close1 > prevOpen && open1 < prevClose && body > MathAbs(prevClose - prevOpen);
    bool bearEngulf = isBear && prevClose > prevOpen && close1 < prevOpen && open1 > prevClose && body > MathAbs(prevClose - prevOpen);
 
@@ -435,12 +457,12 @@ void CheckEntry()
          double lot = CalcLot(slDist);
          if(lot <= 0) return;
 
-         if(trade.Buy(lot, InpSymbol, ask, sl, tp, "SM_BUY_RSI_SR"))
+         if(trade.Buy(lot, g_symbol, ask, sl, tp, "SM_BUY_RSI_SR"))
          {
-            g_lastEntryBar = iTime(InpSymbol, InpTF, 0);
+            g_lastEntryBar = iTime(g_symbol, InpTF, 0);
             g_sessionTrades++;
             g_dailyTrades++;
-            Print("BUY ", InpSymbol, " @ ", ask, " SL=", sl, " TP=", tp,
+            Print("BUY ", g_symbol, " @ ", ask, " SL=", sl, " TP=", tp,
                   " RSI=", rsi0, " Sup=", support, " Lot=", lot);
          }
       }
@@ -457,12 +479,12 @@ void CheckEntry()
          double lot = CalcLot(slDist);
          if(lot <= 0) return;
 
-         if(trade.Buy(lot, InpSymbol, ask, sl, tp, "SM_BUY_PA_SUP"))
+         if(trade.Buy(lot, g_symbol, ask, sl, tp, "SM_BUY_PA_SUP"))
          {
-            g_lastEntryBar = iTime(InpSymbol, InpTF, 0);
+            g_lastEntryBar = iTime(g_symbol, InpTF, 0);
             g_sessionTrades++;
             g_dailyTrades++;
-            Print("BUY ", InpSymbol, " PA@SUP | SL=", sl, " TP=", tp, " Lot=", lot);
+            Print("BUY ", g_symbol, " PA@SUP | SL=", sl, " TP=", tp, " Lot=", lot);
          }
       }
    }
@@ -487,12 +509,12 @@ void CheckEntry()
          double lot = CalcLot(slDist);
          if(lot <= 0) return;
 
-         if(trade.Sell(lot, InpSymbol, bid, sl, tp, "SM_SELL_RSI_SR"))
+         if(trade.Sell(lot, g_symbol, bid, sl, tp, "SM_SELL_RSI_SR"))
          {
-            g_lastEntryBar = iTime(InpSymbol, InpTF, 0);
+            g_lastEntryBar = iTime(g_symbol, InpTF, 0);
             g_sessionTrades++;
             g_dailyTrades++;
-            Print("SELL ", InpSymbol, " @ ", bid, " SL=", sl, " TP=", tp,
+            Print("SELL ", g_symbol, " @ ", bid, " SL=", sl, " TP=", tp,
                   " RSI=", rsi0, " Res=", resistance, " Lot=", lot);
          }
       }
@@ -509,12 +531,12 @@ void CheckEntry()
          double lot = CalcLot(slDist);
          if(lot <= 0) return;
 
-         if(trade.Sell(lot, InpSymbol, bid, sl, tp, "SM_SELL_PA_RES"))
+         if(trade.Sell(lot, g_symbol, bid, sl, tp, "SM_SELL_PA_RES"))
          {
-            g_lastEntryBar = iTime(InpSymbol, InpTF, 0);
+            g_lastEntryBar = iTime(g_symbol, InpTF, 0);
             g_sessionTrades++;
             g_dailyTrades++;
-            Print("SELL ", InpSymbol, " PA@RES | SL=", sl, " TP=", tp, " Lot=", lot);
+            Print("SELL ", g_symbol, " PA@RES | SL=", sl, " TP=", tp, " Lot=", lot);
          }
       }
    }
@@ -529,7 +551,7 @@ void ManageTrailing()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol) continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
 
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -541,18 +563,18 @@ void ManageTrailing()
 
       if(type == POSITION_TYPE_BUY)
       {
-         double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
+         double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
          double newSL = bid - trailDist;
-         if(newSL > sl + SymbolInfoDouble(InpSymbol, SYMBOL_POINT) && newSL < bid)
+         if(newSL > sl + SymbolInfoDouble(g_symbol, SYMBOL_POINT) && newSL < bid)
          {
             trade.PositionModify(ticket, newSL, tp);
          }
       }
       else if(type == POSITION_TYPE_SELL)
       {
-         double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
+         double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
          double newSL = ask + trailDist;
-         if(newSL < sl - SymbolInfoDouble(InpSymbol, SYMBOL_POINT) && newSL > ask)
+         if(newSL < sl - SymbolInfoDouble(g_symbol, SYMBOL_POINT) && newSL > ask)
          {
             trade.PositionModify(ticket, newSL, tp);
          }
@@ -570,7 +592,7 @@ int CountPositions()
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol) continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
       count++;
    }
@@ -584,17 +606,17 @@ double CalcLot(double slDist)
 {
    double balance  = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskAmt  = balance * InpRiskPct / 100.0;
-   double tickVal  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickVal  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
 
    if(tickVal <= 0 || tickSize <= 0 || slDist <= 0) return 0;
 
    double lot = riskAmt / (slDist / tickSize * tickVal);
 
    // Normalize
-   double minLot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
-   double lotStep = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
+   double minLot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
 
    if(lotStep > 0) lot = MathFloor(lot / lotStep) * lotStep;
    lot = MathMax(lot, minLot);
@@ -610,7 +632,7 @@ void UpdateComment(string extra)
 {
    string sep = "\n" + "------------------------------" + "\n";
    string info = "=== ScalpMaster ===" + sep;
-   info += "Symbol: " + InpSymbol + " | TF: " + EnumToString(InpTF) + "\n";
+   info += "Symbol: " + g_symbol + " | TF: " + EnumToString(InpTF) + "\n";
    info += "Session: " + SessionName(g_currentSession) + " (GMT" + IntegerToString(InpGMTOffset) + ")\n";
    info += "ATR: " + DoubleToString(g_atr, 2) + "\n";
 
