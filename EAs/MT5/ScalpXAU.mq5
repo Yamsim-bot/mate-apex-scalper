@@ -27,11 +27,11 @@
 //+------------------------------------------------------------------+
 //--- General
 input string   Inp_Gen            = "======== GENERAL ========";
-input double   RiskPerTradePct    = 1.0;
-input double   MaxDailyRiskPct    = 5.0;
-input double   MaxSessDDPct       = 5.0;
-input int      MaxTradesPerSess   = 40;
-input int      MaxPositions       = 3;
+input double   RiskPerTradePct    = 0.5;
+input double   MaxDailyRiskPct    = 2.0;
+input double   MaxSessDDPct       = 1.5;
+input int      MaxTradesPerSess   = 5;
+input int      MaxPositions       = 1;
 input int      BrokerGMTOffset    = -99;
 input bool     DebugMode          = false;
 
@@ -734,7 +734,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
 
       //--- Ensure min 1.5:1 RR
       slDist = entryPrice - sl;
-      if(tp - entryPrice < slDist * 1.5) tp = entryPrice + slDist * 1.5;
+      if(tp - entryPrice < slDist * 2.0) tp = entryPrice + slDist * 2.0;
 
       sl = NormalizeDouble(sl, digits);
       tp = NormalizeDouble(tp, digits);
@@ -791,7 +791,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
       }
 
       slDist = sl - entryPrice;
-      if(entryPrice - tp < slDist * 1.5) tp = entryPrice - slDist * 1.5;
+      if(entryPrice - tp < slDist * 2.0) tp = entryPrice - slDist * 2.0;
 
       sl = NormalizeDouble(sl, digits);
       tp = NormalizeDouble(tp, digits);
@@ -1165,7 +1165,12 @@ double CalcLotSizeRisk(double slDist, double riskPct)
    if(vstep > 0) maxVol = MathFloor(maxVol / vstep) * vstep;
 
    double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   return MathMax(minVol, MathMin(lot, maxVol));
+   double cappedLot = MathMax(minVol, MathMin(lot, maxVol));
+   //--- Hard cap: never risk more than 1% on a single trade
+   double hardCap = NormalizeDouble(m_account.Balance() / 10000.0 * 1.0, 2);
+   if(vstep > 0) hardCap = MathFloor(hardCap / vstep + 1e-9) * vstep;
+   if(hardCap >= minVol && hardCap < cappedLot) cappedLot = hardCap;
+   return cappedLot;
 }
 
 bool VerifyTrade(int type, double price, double sl, double tp, double lot)
