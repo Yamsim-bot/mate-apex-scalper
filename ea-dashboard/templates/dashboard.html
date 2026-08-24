@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YAMS Mate — EA Dashboard</title>
+<style>
+:root {
+  --bg: #0a0e17; --bg2: #111827; --bg3: #1a2332;
+  --card: #1a2332; --border: #2a3548;
+  --text: #e2e8f0; --muted: #94a3b8;
+  --green: #10b981; --red: #ef4444; --blue: #3b82f6;
+  --gold: #f59e0b; --purple: #8b5cf6;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+/* NAV */
+nav { background: rgba(10,14,23,.95); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+.brand { font-weight: 800; font-size: 18px; color: var(--green); }
+.brand span { color: var(--text); }
+.nav-info { margin-left: auto; font-size: 13px; color: var(--muted); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* MAIN */
+.main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* ACCOUNT OVERVIEW */
+.account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.account-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.account-card .label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+.account-card .value { font-size: 24px; font-weight: 800; margin-top: 4px; }
+.account-card .value.green { color: var(--green); }
+.account-card .value.red { color: var(--red); }
+
+/* SECTION */
+.section { margin-bottom: 32px; }
+.section-title { font-size: 20px; font-weight: 700; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+
+/* EA CARDS */
+.ea-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.ea-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; transition: border-color .2s; }
+.ea-card:hover { border-color: var(--green); }
+.ea-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.ea-dot { width: 12px; height: 12px; border-radius: 50%; }
+.ea-name { font-weight: 700; font-size: 16px; }
+.ea-strategy { font-size: 12px; color: var(--muted); }
+.ea-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ea-stat { padding: 8px; background: rgba(255,255,255,.03); border-radius: 8px; }
+.ea-stat .label { font-size: 11px; color: var(--muted); }
+.ea-stat .val { font-size: 16px; font-weight: 700; margin-top: 2px; }
+.ea-stat .val.green { color: var(--green); }
+.ea-stat .val.red { color: var(--red); }
+
+/* POSITIONS TABLE */
+.table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 12px 16px; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border); }
+td { padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.04); }
+tr:hover td { background: rgba(255,255,255,.02); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+.badge-buy { background: rgba(16,185,129,.15); color: var(--green); }
+.badge-sell { background: rgba(239,68,68,.15); color: var(--red); }
+
+/* EMPTY STATE */
+.empty { text-align: center; padding: 40px; color: var(--muted); }
+.empty .icon { font-size: 48px; margin-bottom: 12px; }
+
+/* TABS */
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+.tab { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border: none; background: none; }
+.tab.active { background: var(--green); color: #000; }
+.tab:hover:not(.active) { background: rgba(255,255,255,.06); }
+
+/* RESPONSIVE */
+@media (max-width: 768px) {
+  .account-grid { grid-template-columns: repeat(2, 1fr); }
+  .ea-grid { grid-template-columns: 1fr; }
+  .main { padding: 16px; }
+}
+
+/* REFRESH */
+.refresh-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 6px 12px; border-radius: 8px; font-size: 12px; cursor: pointer; }
+.refresh-btn:hover { border-color: var(--green); color: var(--green); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="brand">YAMS<span>Mate</span></div>
+  <div class="nav-info">
+    <span class="status-dot"></span>
+    <span>{{ data.account.server or 'Demo Account' }}</span>
+    · Auto-refresh 30s
+  </div>
+</nav>
+
+<div class="main">
+
+  <!-- ACCOUNT OVERVIEW -->
+  <div class="section">
+    <div class="section-title">📊 Account Overview</div>
+    <div class="account-grid">
+      <div class="account-card">
+        <div class="label">Balance</div>
+        <div class="value">${{ "{:,.2f}".format(data.account.balance) }}</div>
+      </div>
+      <div class="account-card">
+        <div class="label">Equity</div>
+        <div class="value">${{ "{:,.2f}".format(data.account.equity) }}</div>
+      </div>
+      <div class="account-card">
+        <div class="label">Open P/L</div>
+        <div class="value {{ 'green' if data.account.profit >= 0 else 'red' }}">
+          {{ "+" if data.account.profit >= 0 else "" }}${{ "{:,.2f}".format(data.account.profit) }}
+        </div>
+      </div>
+      <div class="account-card">
+        <div class="label">Free Margin</div>
+        <div class="value">${{ "{:,.2f}".format(data.account.free_margin) }}</div>
+      </div>
+      <div class="account-card">
+        <div class="label">Leverage</div>
+        <div class="value">1:{{ data.account.leverage }}</div>
+      </div>
+      <div class="account-card">
+        <div class="label">Open Positions</div>
+        <div class="value">{{ data.positions|length }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EA PERFORMANCE -->
+  <div class="section">
+    <div class="section-title">🤖 EA Performance (Last 30 Days)</div>
+    {% if data.ea_stats %}
+    <div class="ea-grid">
+      {% for ea_name, stats in data.ea_stats.items() %}
+      <div class="ea-card">
+        <div class="ea-header">
+          <div class="ea-dot" style="background:{{ stats.color }}"></div>
+          <div>
+            <div class="ea-name">{{ ea_name }}</div>
+            <div class="ea-strategy">{{ stats.strategy }}</div>
+          </div>
+        </div>
+        <div class="ea-stats">
+          <div class="ea-stat">
+            <div class="label">Trades</div>
+            <div class="val">{{ stats.trades }}</div>
+          </div>
+          <div class="ea-stat">
+            <div class="label">Win Rate</div>
+            <div class="val">{{ stats.win_rate }}%</div>
+          </div>
+          <div class="ea-stat">
+            <div class="label">Net P/L</div>
+            <div class="val {{ 'green' if stats.net_profit >= 0 else 'red' }}">
+              {{ "+" if stats.net_profit >= 0 else "" }}${{ "{:,.2f}".format(stats.net_profit) }}
+            </div>
+          </div>
+          <div class="ea-stat">
+            <div class="label">Profit Factor</div>
+            <div class="val">{{ stats.profit_factor }}</div>
+          </div>
+          <div class="ea-stat">
+            <div class="label">Best Trade</div>
+            <div class="val green">+${{ "{:,.2f}".format(stats.best_trade) }}</div>
+          </div>
+          <div class="ea-stat">
+            <div class="label">Worst Trade</div>
+            <div class="val red">${{ "{:,.2f}".format(stats.worst_trade) }}</div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="icon">📭</div>
+      <p>No EA data yet. Trades will appear after EAs start executing.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- OPEN POSITIONS -->
+  <div class="section">
+    <div class="section-title">📈 Open Positions</div>
+    {% if data.positions %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>EA</th>
+            <th>Symbol</th>
+            <th>Type</th>
+            <th>Volume</th>
+            <th>Open Price</th>
+            <th>Current</th>
+            <th>SL</th>
+            <th>TP</th>
+            <th>P/L</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pos in data.positions %}
+          <tr>
+            <td><strong>{{ pos.ea_name }}</strong></td>
+            <td>{{ pos.symbol }}</td>
+            <td><span class="badge {{ 'badge-buy' if pos.type == 'BUY' else 'badge-sell' }}">{{ pos.type }}</span></td>
+            <td>{{ pos.volume }}</td>
+            <td>{{ "{:.2f}".format(pos.open_price) }}</td>
+            <td>{{ "{:.2f}".format(pos.current_price) }}</td>
+            <td>{{ "{:.2f}".format(pos.sl) }}</td>
+            <td>{{ "{:.2f}".format(pos.tp) }}</td>
+            <td class="{{ 'green' if pos.profit >= 0 else 'red' }}">
+              {{ "+" if pos.profit >= 0 else "" }}${{ "{:,.2f}".format(pos.profit) }}
+            </td>
+            <td>{{ pos.time }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="icon">📭</div>
+      <p>No open positions. EAs are scanning for setups.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- RECENT TRADES -->
+  <div class="section">
+    <div class="section-title">📋 Recent Trades</div>
+    {% if data.trades %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>EA</th>
+            <th>Symbol</th>
+            <th>Type</th>
+            <th>Volume</th>
+            <th>Price</th>
+            <th>P/L</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for trade in data.trades[-20:]|reverse %}
+          <tr>
+            <td><strong>{{ trade.ea_name }}</strong></td>
+            <td>{{ trade.symbol }}</td>
+            <td><span class="badge {{ 'badge-buy' if trade.type == 'BUY' else 'badge-sell' }}">{{ trade.type }}</span></td>
+            <td>{{ trade.volume }}</td>
+            <td>{{ "{:.2f}".format(trade.price) }}</td>
+            <td class="{{ 'green' if trade.profit >= 0 else 'red' }}">
+              {{ "+" if trade.profit >= 0 else "" }}${{ "{:,.2f}".format(trade.profit) }}
+            </td>
+            <td>{{ trade.time }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="icon">📭</div>
+      <p>No trades in the last 30 days.</p>
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
+<script>
+// Auto-refresh every 30 seconds
+setTimeout(() => location.reload(), 30000);
+
+// Manual refresh
+document.querySelectorAll('.refresh-btn').forEach(btn => {
+  btn.addEventListener('click', () => location.reload());
+});
+</script>
+
+</body>
+</html>
