@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YAMS Mate — Algorithmic Trading Systems</title>
+<style>
+:root {
+  --bg: #0a0e17;
+  --bg2: #111827;
+  --bg3: #1a2332;
+  --card: #1a2332;
+  --card-hover: #1e2a3d;
+  --border: #2a3548;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #10b981;
+  --accent2: #3b82f6;
+  --gold: #f59e0b;
+  --red: #ef4444;
+  --green: #10b981;
+  --purple: #8b5cf6;
+  --shadow: 0 4px 24px rgba(0,0,0,.4);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+/* NAV */
+nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(10,14,23,.92);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-inner {
+  max-width: 1100px; margin: 0 auto;
+  padding: 14px 24px;
+  display: flex; align-items: center; gap: 32px;
+}
+.brand { font-weight: 800; font-size: 20px; color: var(--accent); letter-spacing: -.5px; }
+.brand span { color: var(--text); }
+.nav-links { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.nav-links a {
+  color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 600;
+  padding: 8px 14px; border-radius: 8px; transition: all .15s;
+}
+.nav-links a:hover { color: var(--text); background: rgba(255,255,255,.06); }
+.nav-cta {
+  background: var(--accent) !important; color: #000 !important; font-weight: 700 !important;
+}
+.nav-cta:hover { background: #059669 !important; }
+
+/* HERO */
+.hero {
+  max-width: 1100px; margin: 0 auto; padding: 80px 24px 60px;
+  text-align: center;
+}
+.hero-badge {
+  display: inline-block;
+  background: rgba(16,185,129,.12); border: 1px solid rgba(16,185,129,.3);
+  color: var(--accent); font-size: 13px; font-weight: 700;
+  padding: 6px 16px; border-radius: 999px; margin-bottom: 24px;
+}
+.hero h1 {
+  font-size: clamp(36px, 6vw, 64px);
+  font-weight: 800; letter-spacing: -1.5px;
+  line-height: 1.1; margin-bottom: 20px;
+}
+.hero h1 .gradient {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero p {
+  font-size: 18px; color: var(--muted); max-width: 640px; margin: 0 auto 36px;
+}
+.hero-stats {
+  display: flex; justify-content: center; gap: 48px; flex-wrap: wrap;
+  margin-top: 48px;
+}
+.hero-stat { text-align: center; }
+.hero-stat .num {
+  font-size: 36px; font-weight: 800; color: var(--accent);
+}
+.hero-stat .label { font-size: 13px; color: var(--muted); font-weight: 600; margin-top: 4px; }
+
+/* SECTIONS */
+section {
+  max-width: 1100px; margin: 0 auto; padding: 60px 24px;
+}
+.section-title {
+  font-size: 32px; font-weight: 800; letter-spacing: -.5px;
+  margin-bottom: 8px;
+}
+.section-sub {
+  color: var(--muted); font-size: 16px; margin-bottom: 40px; max-width: 600px;
+}
+
+/* EA CARDS */
+.ea-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 20px;
+}
+.ea-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 28px; transition: all .2s;
+}
+.ea-card:hover {
+  border-color: var(--accent); transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(16,185,129,.1);
+}
+.ea-card .icon {
+  width: 48px; height: 48px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; margin-bottom: 16px;
+}
+.ea-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.ea-card .tag {
+  display: inline-block; font-size: 11px; font-weight: 700;
+  padding: 3px 10px; border-radius: 999px; margin-bottom: 12px;
+}
+.ea-card p { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+.ea-card .features { list-style: none; }
+.ea-card .features li {
+  font-size: 13px; color: var(--muted); padding: 4px 0;
+  display: flex; align-items: center; gap: 8px;
+}
+.ea-card .features li::before {
+  content: "✓"; color: var(--accent); font-weight: 700; font-size: 14px;
+}
+
+/* MYFXBOOK */
+.myfxbook-section {
+  background: var(--bg2); border-radius: 20px; padding: 40px;
+  border: 1px solid var(--border);
+}
+.myfxbook-section h2 { text-align: center; margin-bottom: 24px; }
+.myfxbook-frame {
+  background: var(--bg3); border-radius: 12px;
+  padding: 20px; text-align: center; min-height: 200px;
+  border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 14px;
+}
+.myfxbook-frame a { color: var(--accent); text-decoration: underline; }
+
+/* PRICING */
+.pricing-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px; margin-top: 40px;
+}
+.price-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 32px; text-align: center;
+  position: relative; transition: all .2s;
+}
+.price-card.featured {
+  border-color: var(--accent);
+  box-shadow: 0 0 40px rgba(16,185,129,.1);
+}
+.price-card.featured::before {
+  content: "MOST POPULAR"; position: absolute; top: -12px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent); color: #000; font-size: 11px; font-weight: 800;
+  padding: 4px 16px; border-radius: 999px;
+}
+.price-card h3 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+.price-card .price {
+  font-size: 42px; font-weight: 800; margin: 16px 0;
+}
+.price-card .price span { font-size: 16px; color: var(--muted); font-weight: 500; }
+.price-card .desc { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+.price-card .features { list-style: none; text-align: left; margin-bottom: 28px; }
+.price-card .features li {
+  font-size: 14px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,.05);
+  display: flex; align-items: center; gap: 10px;
+}
+.price-card .features li::before { content: "✓"; color: var(--accent); font-weight: 700; }
+.btn {
+  display: inline-block; padding: 14px 32px; border-radius: 12px;
+  font-weight: 700; font-size: 15px; text-decoration: none;
+  transition: all .15s; cursor: pointer; border: none;
+}
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:hover { background: #059669; transform: translateY(-1px); }
+.btn-outline {
+  background: transparent; color: var(--text);
+  border: 1.5px solid var(--border);
+}
+.btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+
+/* HOW IT WORKS */
+.steps {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 24px; margin-top: 40px;
+}
+.step {
+  text-align: center; padding: 24px;
+}
+.step .num {
+  width: 56px; height: 56px; border-radius: 16px;
+  background: rgba(16,185,129,.1); border: 1px solid rgba(16,185,129,.2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 800; color: var(--accent);
+  margin: 0 auto 16px;
+}
+.step h3 { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+.step p { font-size: 14px; color: var(--muted); }
+
+/* FAQ */
+.faq-item {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; margin-bottom: 12px; overflow: hidden;
+}
+.faq-q {
+  padding: 18px 24px; cursor: pointer; font-weight: 700; font-size: 15px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.faq-q::after { content: "+"; font-size: 20px; color: var(--accent); transition: transform .2s; }
+.faq-item.open .faq-q::after { transform: rotate(45deg); }
+.faq-a {
+  max-height: 0; overflow: hidden; transition: max-height .3s ease;
+  padding: 0 24px; color: var(--muted); font-size: 14px;
+}
+.faq-item.open .faq-a { max-height: 300px; padding-bottom: 18px; }
+
+/* FOOTER */
+footer {
+  border-top: 1px solid var(--border); text-align: center;
+  padding: 40px 24px; color: var(--muted); font-size: 13px;
+}
+footer a { color: var(--accent); text-decoration: none; }
+
+/* CTA */
+.cta-section {
+  background: linear-gradient(135deg, rgba(16,185,129,.08), rgba(59,130,246,.08));
+  border: 1px solid var(--border); border-radius: 20px;
+  padding: 60px 40px; text-align: center; margin: 40px auto;
+}
+.cta-section h2 { font-size: 28px; margin-bottom: 12px; }
+.cta-section p { color: var(--muted); margin-bottom: 28px; }
+
+/* RESPONSIVE */
+@media (max-width: 768px) {
+  .nav-links { display: none; }
+  .hero-stats { gap: 24px; }
+  .hero-stat .num { font-size: 28px; }
+  section { padding: 40px 16px; }
+  .pricing-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <div class="brand">YAMS<span>Mate</span></div>
+    <div class="nav-links">
+      <a href="#eas">EAs</a>
+      <a href="#performance">Performance</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#how">How It Works</a>
+      <a href="#faq">FAQ</a>
+      <a href="#cta" class="nav-cta">Get Started</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">🤖 Algorithmic Trading Systems</div>
+  <h1>Automated Trading<br><span class="gradient">That Works For You</span></h1>
+  <p>Professional-grade trading algorithms running 24/5 on MetaTrader 5. Built with FRVP, price action, and session-gated strategies. Verified results on Myfxbook.</p>
+  <div>
+    <a href="#pricing" class="btn btn-primary" style="margin-right: 12px;">View Plans</a>
+    <a href="#performance" class="btn btn-outline">See Results</a>
+  </div>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="num">5</div><div class="label">Trading EAs</div></div>
+    <div class="hero-stat"><div class="num">24/5</div><div class="label">Automated</div></div>
+    <div class="hero-stat"><div class="num">0.5%</div><div class="label">Risk Per Trade</div></div>
+    <div class="hero-stat"><div class="num">2:1</div><div class="label">Min Risk:Reward</div></div>
+  </div>
+</section>
+
+<!-- EAs -->
+<section id="eas">
+  <div class="section-title">Our Trading Systems</div>
+  <div class="section-sub">Each EA uses a different strategy and timeframe. Diversification reduces risk.</div>
+  <div class="ea-grid">
+
+    <div class="ea-card">
+      <div class="icon" style="background:rgba(16,185,129,.12);">📊</div>
+      <h3>ScalpXAU</h3>
+      <div class="tag" style="background:rgba(16,185,129,.12);color:var(--accent);">M15 • XAUUSD</div>
+      <p>Fixed Range Volume Profile + Price Action patterns at key zones. Session-gated entries for Asian, London, and NY sessions.</p>
+      <ul class="features">
+        <li>FRVP zones (POC/VAH/VAL/HVN/LVN)</li>
+        <li>Pin bar & engulfing at volume zones</li>
+        <li>MA50/200 trend filter</li>
+        <li>Break-even + trailing stops</li>
+        <li>2:1 minimum risk:reward</li>
+      </ul>
+    </div>
+
+    <div class="ea-card">
+      <div class="icon" style="background:rgba(59,130,246,.12);">⚡</div>
+      <h3>ScalpMaster</h3>
+      <div class="tag" style="background:rgba(59,130,246,.12);color:var(--accent2);">M5 • XAUUSD/XAGUSD</div>
+      <p>RSI + Support/Resistance with candlestick pattern confirmation. Fast scalping on the 5-minute chart.</p>
+      <ul class="features">
+        <li>RSI oversold/overbought zones</li>
+        <li>Swing S/R detection & clustering</li>
+        <li>Pin bar & engulfing confirmation</li>
+        <li>Trailing stop management</li>
+        <li>Spread & ATR volatility filters</li>
+      </ul>
+    </div>
+
+    <div class="ea-card">
+      <div class="icon" style="background:rgba(245,158,11,.12);">📈</div>
+      <h3>FXPair EA</h3>
+      <div class="tag" style="background:rgba(245,158,11,.12);color:var(--gold);">M5 • Multi-Symbol</div>
+      <p>EMA alignment + swing structure + break & retest with FRVP confluence. Trades EURUSD, USDJPY, USDCAD, AUDUSD.</p>
+      <ul class="features">
+        <li>M15 EMA 20/50/200 alignment</li>
+        <li>Swing structure (HH/HL/LH/LL)</li>
+        <li>Break & retest at S/R levels</li>
+        <li>FRVP + S/R confluence scoring</li>
+        <li>Partial TP at 75% with trailing</li>
+      </ul>
+    </div>
+
+    <div class="ea-card">
+      <div class="icon" style="background:rgba(139,92,246,.12);">🎯</div>
+      <h3>FXRE Hybrid</h3>
+      <div class="tag" style="background:rgba(139,92,246,.12);color:var(--purple);">M5+M15 • XAUUSD</div>
+      <p>Supply & Demand zone detection with swing structure. Scalp mode with momentum breakout entries.</p>
+      <ul class="features">
+        <li>Swing S&D zone detection (1000-bar scan)</li>
+        <li>ATR-based zone clustering</li>
+        <li>Scalp mode: momentum breakout</li>
+        <li>Partial TP at 60% + trailing</li>
+        <li>TP pause after 5 hits/session</li>
+      </ul>
+    </div>
+
+    <div class="ea-card">
+      <div class="icon" style="background:rgba(239,68,68,.12);">🔥</div>
+      <h3>FXYAMS Ultimate</h3>
+      <div class="tag" style="background:rgba(239,68,68,.12);color:var(--red);">M15 • XAUUSD/XAGUSD</div>
+      <p>Bollinger Bands + Swing + RSI structure scalper with trend-following leg. Dual-mode: scalp + trend.</p>
+      <ul class="features">
+        <li>BB bands + swing highs/lows</li>
+        <li>RSI extremes filtering</li>
+        <li>TrendMode: MA50/200 pullback entries</li>
+        <li>Partial TP at 60% + trailing</li>
+        <li>TP pause after 8 hits/session</li>
+      </ul>
+    </div>
+
+  </div>
+</section>
+
+<!-- PERFORMANCE -->
+<section id="performance">
+  <div class="myfxbook-section">
+    <div class="section-title" style="text-align:center;">Verified Performance</div>
+    <p style="color:var(--muted);text-align:center;margin-bottom:24px;">All results verified by Myfxbook — a third-party audit service. No manipulation possible.</p>
+    <div class="myfxbook-frame">
+      <div>
+        <p style="font-size:16px;margin-bottom:12px;">📊 <strong>Live Results on Myfxbook</strong></p>
+        <p style="margin-bottom:16px;">Connect your Myfxbook widget here to show verified stats</p>
+        <a href="https://www.myfxbook.com/members/abcaptrading/gainz-algo-v2-ea/10273725" target="_blank" class="btn btn-outline" style="font-size:13px;">View on Myfxbook →</a>
+      </div>
+    </div>
+    <!--
+      TO ADD YOUR MYFXBOOK WIDGET:
+      1. Go to myfxbook.com → Accounts → Add
+      2. Get your widget code from: myfxbook.com/widgets
+      3. Paste it inside .myfxbook-frame div above
+    -->
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="section-title">How It Works</div>
+  <div class="section-sub">Start automated trading in 3 simple steps.</div>
+  <div class="steps">
+    <div class="step">
+      <div class="num">1</div>
+      <h3>Choose a Plan</h3>
+      <p>Pick the tier that fits your account size and risk appetite.</p>
+    </div>
+    <div class="step">
+      <div class="num">2</div>
+      <h3>Setup MT5</h3>
+      <p>We provide EA files + setup guide. Attach to your charts with our recommended settings.</p>
+    </div>
+    <div class="step">
+      <div class="num">3</div>
+      <h3>Trade Automatically</h3>
+      <p>EAs run 24/5. Monitor via Telegram alerts. We handle updates and support.</p>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section id="pricing">
+  <div class="section-title">Plans & Pricing</div>
+  <div class="section-sub">All plans include: EA files, Telegram alerts, setup guide, and email support.</div>
+  <div class="pricing-grid">
+
+    <div class="price-card">
+      <h3>Starter</h3>
+      <div class="price">$49<span>/mo</span></div>
+      <div class="desc">Perfect for small accounts getting started</div>
+      <ul class="features">
+        <li>2 EAs (ScalpMaster + ScalpXAU)</li>
+        <li>XAUUSD & XAGUSD</li>
+        <li>Recommended settings included</li>
+        <li>Telegram trade alerts</li>
+        <li>Email support</li>
+        <li>Monthly updates</li>
+      </ul>
+      <a href="#cta" class="btn btn-outline" style="width:100%;text-align:center;">Get Started</a>
+    </div>
+
+    <div class="price-card featured">
+      <h3>Professional</h3>
+      <div class="price">$99<span>/mo</span></div>
+      <div class="desc">Full suite for serious traders</div>
+      <ul class="features">
+        <li>All 5 EAs included</li>
+        <li>XAUUSD, XAGUSD, EURUSD+</li>
+        <li>Custom settings per account size</li>
+        <li>Telegram trade alerts + reports</li>
+        <li>Priority support (24hr response)</li>
+        <li>Weekly performance updates</li>
+        <li>Strategy explanations & calls</li>
+      </ul>
+      <a href="#cta" class="btn btn-primary" style="width:100%;text-align:center;">Get Started</a>
+    </div>
+
+    <div class="price-card">
+      <h3>Enterprise</h3>
+      <div class="price">$249<span>/mo</span></div>
+      <div class="desc">For prop firms and fund managers</div>
+      <ul class="features">
+        <li>All 5 EAs + source code access</li>
+        <li>Custom EA modifications</li>
+        <li>White-label option available</li>
+        <li>VPS setup assistance</li>
+        <li>Prop firm strategy optimization</li>
+        <li>Dedicated support channel</li>
+        <li>Monthly strategy review calls</li>
+      </ul>
+      <a href="#cta" class="btn btn-outline" style="width:100%;text-align:center;">Contact Us</a>
+    </div>
+
+  </div>
+</section>
+
+<!-- FAQ -->
+<section id="faq">
+  <div class="section-title">Frequently Asked Questions</div>
+  <div style="margin-top:24px;">
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">What broker do I need?</div>
+      <div class="faq-a">Any MT5 broker works. We recommend brokers with tight spreads on gold (XAUUSD). Our EAs are currently running on VantageMarkets demo and live accounts. Make sure your broker supports the symbols you want to trade.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">How much do I need to start?</div>
+      <div class="faq-a">Minimum recommended: $1,000 for a standard account, or $100 for a cent account. The EAs risk only 0.5% per trade, so even small accounts are protected. Prop firm accounts ($10K+) work great too.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">Do I need to run a VPS?</div>
+      <div class="faq-a">Yes, for 24/5 operation. We provide a VPS setup guide. A basic Windows VPS costs $10-20/month. Alternatively, you can run MT5 on your local PC during trading hours.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">What's the expected return?</div>
+      <div class="faq-a">We don't promise specific returns — anyone who does is lying. What we offer is a disciplined, risk-managed system with proven strategies. Our EAs target 2-5% monthly with strict risk controls. Past performance doesn't guarantee future results.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">Can I use this with a prop firm?</div>
+      <div class="faq-a">Yes! Our EAs are designed with prop firm rules in mind: conservative risk per trade (0.5%), daily drawdown limits, and session-gated trading. ScalpXAU and FXPair are particularly popular with prop firm traders.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">What if it doesn't work for me?</div>
+      <div class="faq-a">We offer a 7-day satisfaction guarantee. If you're not happy with the setup support or EA performance, contact us for a full refund. We want satisfied traders, not trapped customers.</div>
+    </div>
+
+    <div class="faq-item">
+      <div class="faq-q" onclick="toggleFaq(this)">How are updates handled?</div>
+      <div class="faq-a">We regularly optimize EAs based on market conditions. Updates are pushed automatically and you'll receive new .ex5 files via email or Telegram. All updates are free for active subscribers.</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- CTA -->
+<section id="cta">
+  <div class="cta-section">
+    <h2>Ready to Automate Your Trading?</h2>
+    <p>Join traders who let algorithms do the work while they focus on life.</p>
+    <a href="https://t.me/YOUR_TELEGRAM" target="_blank" class="btn btn-primary" style="margin-right: 12px;">💬 Contact on Telegram</a>
+    <a href="#pricing" class="btn btn-outline">View Pricing</a>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <p style="margin-bottom:8px;">
+    <strong style="color:var(--accent);">YAMS Mate</strong> — Algorithmic Trading Systems
+  </p>
+  <p style="margin-bottom:12px;">
+    <a href="https://t.me/YOUR_TELEGRAM" target="_blank">Telegram</a> · 
+    <a href="https://github.com/YOUR_GITHUB" target="_blank">GitHub</a> · 
+    <a href="https://www.myfxbook.com/members/abcaptrading/gainz-algo-v2-ea/10273725" target="_blank">Myfxbook</a>
+  </p>
+  <p style="font-size:12px;color:rgba(255,255,255,.3);">
+    ⚠️ Trading involves substantial risk of loss. Past performance is not indicative of future results.
+    Only trade with money you can afford to lose.
+  </p>
+</footer>
+
+<script>
+function toggleFaq(el) {
+  el.parentElement.classList.toggle('open');
+}
+
+// Smooth scroll for nav links
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+</script>
+
+</body>
+</html>
