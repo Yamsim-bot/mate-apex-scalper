@@ -10,8 +10,10 @@
 //|  - ATR-based SL + TP with break-even + trailing                  |
 //+------------------------------------------------------------------+
 #property copyright "FXRE v3.0"
-#property version   "3.00"
+#property version   "3.10"
 #property description "XAUUSD FRVP + Price Action Scalper"
+#property description "v3.10: + Asia-VP Mode (Shadow Intel): Asian session volume profile"
+#property description "       + London sweep reversal + tick-flow confirmation"
 #property description "Session-gated entries at Volume Profile zones"
 #property strict
 
@@ -86,6 +88,13 @@ input double   SR_ScoreSupport    = 2;              // Confluence score: at supp
 input double   SR_ScoreResistance = 2;              // Confluence score: at resistance
 input double   SR_ScoreMTF        = 1;              // Extra score: multi-TF confirmation
 
+//--- Asia VP Mode (Shadow Intel style)
+input string   Inp_AsiaVP         = "==== ASIA VP MODE ======";
+input bool     EnableAsiaVP       = true;           // Asia-VP London sweep reversal ON
+input double   AsiaVP_MinRangeATR = 2.0;            // Min Asian range to trade (xATR)
+input bool     AsiaVP_UseFlow     = true;           // Require tick-flow confirmation
+input int      AsiaVP_FlowWinMin  = 20;             // Tick-flow lookback window (minutes)
+
 //--- Session Times in GMT
 input string   Inp_Time           = "====== SESSION GMT TIMES ====";
 input int      Asian_StartH       = 0;
@@ -157,6 +166,20 @@ int            g_brokerGMTOffset = 0;
 //--- Fill mode
 ENUM_ORDER_TYPE_FILLING g_fillMode = ORDER_FILLING_FOK;
 
+//--- Asia VP mode state (Shadow Intel)
+double         g_asiaPOC = 0;
+double         g_asiaVAH = 0;
+double         g_asiaVAL = 0;
+bool           g_asiaProfileValid = false;
+
+//--- Tick-flow ring buffer (1-minute bins, ~1h history)
+#define FLOW_BINS 70
+double         g_flowBuy[FLOW_BINS];
+double         g_flowSell[FLOW_BINS];
+datetime       g_flowMinute[FLOW_BINS];
+int            g_flowHead = -1;
+double         g_lastFlowBid = 0;
+
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
@@ -223,6 +246,9 @@ int OnInit()
    Print("PA: pin_wick=", PA_MinWickATR, "xATR wick/body>=", PA_WickBodyRatio,
          " engulf_body>=", PA_MinBodyATR, "xATR trend_gate=", PA_RequireTrend ? "ON" : "OFF");
    Print("Magic: ", MagicNumber, " | Risk: ", RiskPerTradePct, "% per trade, max ", MaxDailyRiskPct, "% daily");
+   Print("AsiaVP: ", EnableAsiaVP ? "ON" : "OFF",
+         " min_range=", AsiaVP_MinRangeATR, "xATR flow_confirm=", AsiaVP_UseFlow ? "ON" : "OFF",
+         " win=", AsiaVP_FlowWinMin, "min");
 
    return INIT_SUCCEEDED;
 }
@@ -254,6 +280,7 @@ void OnTick()
 
    g_atrValue = CalcATR(14, EntryTF);
    g_tickCount++;
+   AccumulateTickFlow();
 
    if(IsNewBar())
    {
@@ -372,6 +399,7 @@ void CheckEntry()
          CheckAsianEntry(trendDir);
          break;
       case SESS_LONDON:
+         if(EnableAsiaVP && CheckLondonSweepEntry(trendDir)) break;
          CheckLondonEntry(trendDir);
          break;
       case SESS_NY:
@@ -684,6 +712,206 @@ void CheckNYEntry(int trendDir)
 }
 
 //+------------------------------------------------------------------+
+//| Tick-flow proxy: classify each tick as buy/sell (last-delta rule)|
+//+------------------------------------------------------------------+
+void AccumulateTickFlow()
+{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0) return;
+
+   datetime now = TimeTradeServer();
+   datetime nowMin = now - (now % 60);
+
+   if(g_lastFlowBid <= 0) { g_lastFlowBid = bid; return; }
+   int dir = (bid > g_lastFlowBid) ? +1 : (bid < g_lastFlowBid ? -1 : 0);
+   g_lastFlowBid = bid;
+   if(dir == 0) return;
+
+   if(g_flowHead < 0 || g_flowMinute[g_flowHead] != nowMin)
+   {
+      g_flowHead = (g_flowHead + 1) % FLOW_BINS;
+      g_flowMinute[g_flowHead] = nowMin;
+      g_flowBuy[g_flowHead] = 0;
+      g_flowSell[g_flowHead] = 0;
+   }
+   if(dir > 0) g_flowBuy[g_flowHead] += 1.0;
+   else        g_flowSell[g_flowHead] += 1.0;
+}
+
+//+------------------------------------------------------------------+
+//| Fraction of buying pressure over the last N minutes (0..1)       |
+//+------------------------------------------------------------------+
+double TF_BuyRatio(int windowMinutes)
+{
+   if(g_flowHead < 0) return 0.5;
+   datetime now = TimeTradeServer();
+   datetime cutoff = now - (datetime)(windowMinutes * 60);
+   double buy = 0, sell = 0;
+   for(int i = 0; i < FLOW_BINS; i++)
+   {
+      if(g_flowMinute[i] == 0 || g_flowMinute[i] < cutoff) continue;
+      buy  += g_flowBuy[i];
+      sell += g_flowSell[i];
+   }
+   double tot = buy + sell;
+   if(tot <= 0) return 0.5;
+   return buy / tot;
+}
+
+//+------------------------------------------------------------------+
+//| Build volume profile of TODAY'S Asian session only               |
+//| Produces Asia-POC / VAH / VAL used by London sweep entries       |
+//+------------------------------------------------------------------+
+void ComputeAsiaProfile()
+{
+   g_asiaProfileValid = false;
+   g_asiaPOC = 0; g_asiaVAH = 0; g_asiaVAL = 0;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, EntryTF, 0, 300, rates) < 10) return;
+
+   double bucket = (FRVP_BucketPips > 0) ? FRVP_BucketPips : 0.50;
+   double lo = 1e9, hi = 0;
+   int n = 0;
+
+   //--- Pass 1: find Asian-window price extent
+   for(int i = 0; i < ArraySize(rates); i++)
+   {
+      MqlDateTime dt;
+      TimeToStruct(rates[i].time, dt);
+      int hourGMT = dt.hour - g_brokerGMTOffset;
+      if(hourGMT < 0) hourGMT += 24;
+
+      bool inAsian = (hourGMT == Asian_StartH && dt.min >= Asian_StartM) ||
+                     (hourGMT > Asian_StartH && hourGMT < Asian_EndH) ||
+                     (hourGMT == Asian_EndH && dt.min <= Asian_EndM);
+      if(!inAsian) continue;
+      if(rates[i].low  < lo) lo = rates[i].low;
+      if(rates[i].high > hi) hi = rates[i].high;
+      n++;
+   }
+   if(n < 3 || hi <= lo) return;
+
+   //--- Pass 2: histogram, spread each bar's tick volume across its range
+   int nb = (int)MathCeil((hi - lo) / bucket) + 1;
+   if(nb < 2) return;
+   double volA[];
+   ArrayResize(volA, nb);
+   ArrayInitialize(volA, 0.0);
+
+   for(int i = 0; i < ArraySize(rates); i++)
+   {
+      MqlDateTime dt;
+      TimeToStruct(rates[i].time, dt);
+      int hourGMT = dt.hour - g_brokerGMTOffset;
+      if(hourGMT < 0) hourGMT += 24;
+
+      bool inAsian = (hourGMT == Asian_StartH && dt.min >= Asian_StartM) ||
+                     (hourGMT > Asian_StartH && hourGMT < Asian_EndH) ||
+                     (hourGMT == Asian_EndH && dt.min <= Asian_EndM);
+      if(!inAsian) continue;
+
+      double vol = (rates[i].tick_volume > 0) ? (double)rates[i].tick_volume : 1.0;
+      int b0 = (int)MathFloor((rates[i].low  - lo) / bucket);
+      int b1 = (int)MathFloor((rates[i].high - lo) / bucket);
+      if(b0 < 0) b0 = 0;
+      if(b1 >= nb) b1 = nb - 1;
+      int span = b1 - b0 + 1;
+      double per = vol / span;
+      for(int b = b0; b <= b1; b++) volA[b] += per;
+   }
+
+   //--- POC
+   int pocIdx = 0;
+   double total = 0;
+   for(int b = 0; b < nb; b++) { total += volA[b]; if(volA[b] > volA[pocIdx]) pocIdx = b; }
+   if(total <= 0) return;
+
+   //--- Value area: expand from POC taking the fatter neighbour
+   double vaTarget = total * FRVP_ValueAreaPct / 100.0;
+   double vaVol = volA[pocIdx];
+   int loIdx = pocIdx, hiIdx = pocIdx;
+   while(vaVol < vaTarget && (loIdx > 0 || hiIdx < nb - 1))
+   {
+      double dn = (loIdx > 0)        ? volA[loIdx - 1] : -1;
+      double up = (hiIdx < nb - 1)   ? volA[hiIdx + 1] : -1;
+      if(up >= dn) { hiIdx++; vaVol += volA[hiIdx]; }
+      else         { loIdx--; vaVol += volA[loIdx]; }
+   }
+
+   g_asiaPOC = NormalizeDouble(lo + (pocIdx + 0.5) * bucket, _Digits);
+   g_asiaVAH = NormalizeDouble(lo + (hiIdx + 1.0) * bucket, _Digits);
+   g_asiaVAL = NormalizeDouble(lo + loIdx * bucket, _Digits);
+   g_asiaProfileValid = true;
+
+   Print("AsiaVP | Range=", DoubleToString(lo, 2), "-", DoubleToString(hi, 2),
+         " POC=", DoubleToString(g_asiaPOC, 2),
+         " VAH=", DoubleToString(g_asiaVAH, 2),
+         " VAL=", DoubleToString(g_asiaVAL, 2));
+}
+
+//+------------------------------------------------------------------+
+//| LONDON SWEEP ENTRY (Asia-VP grab & reverse, Shadow Intel style)  |
+//| Sweep of Asian high/low that closes back inside = fade toward    |
+//| Asia value area. Confirmed by tick-flow pressure.                |
+//| Returns true if a signal was processed this bar.                 |
+//+------------------------------------------------------------------+
+bool CheckLondonSweepEntry(int trendDir)
+{
+   if(!g_asianRangeReady || !g_asiaProfileValid) return false;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, EntryTF, 0, 8, rates) < 4) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double atr = g_atrValue;
+   if(atr <= 0) return false;
+
+   //--- Range quality gate: dead Asian sessions are not tradeable
+   double asianRange = g_asianHigh - g_asianLow;
+   if(asianRange < AsiaVP_MinRangeATR * atr) return false;
+
+   //--- Scan last 3 closed bars for a sweep-and-reject of Asian extremes
+   for(int c = 1; c <= 3 && c < ArraySize(rates); c++)
+   {
+      //--- BEARISH grab: pushed above Asian high, closed back inside
+      if(rates[c].high > g_asianHigh && rates[c].close < g_asianHigh && rates[c].close < rates[c].open)
+      {
+         bool zoneOk = (ask >= g_asiaVAH - atr * FRVP_ZoneTolATR) || (bid <= g_asiaVAH);
+         bool flowOk = (!AsiaVP_UseFlow) || (TF_BuyRatio(AsiaVP_FlowWinMin) < 0.45);
+         bool trendOk = (!PA_RequireTrend || trendDir <= 0);
+         if(zoneOk && flowOk && trendOk)
+         {
+            //--- SL beyond sweep extreme, TP at Asia VAL / POC
+            double tpZone = (g_asiaVAL < ask - atr) ? g_asiaVAL : g_asiaPOC;
+            ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "LON_SWEEP", "AsiaVP_SweepHIGH",
+                         rates[c].high, tpZone);
+            return true;
+         }
+      }
+
+      //--- BULLISH grab: pushed below Asian low, closed back inside
+      if(rates[c].low < g_asianLow && rates[c].close > g_asianLow && rates[c].close > rates[c].open)
+      {
+         bool zoneOk = (bid <= g_asiaVAL + atr * FRVP_ZoneTolATR) || (bid >= g_asiaVAL);
+         bool flowOk = (!AsiaVP_UseFlow) || (TF_BuyRatio(AsiaVP_FlowWinMin) > 0.55);
+         bool trendOk = (!PA_RequireTrend || trendDir >= 0);
+         if(zoneOk && flowOk && trendOk)
+         {
+            double tpZone = (g_asiaVAH > bid + atr) ? g_asiaVAH : g_asiaPOC;
+            ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "LON_SWEEP", "AsiaVP_SweepLOW",
+                         rates[c].low, tpZone);
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Execute a trade with risk-based sizing                           |
 //| srSL/srTP = S/R-derived levels (0 = use ATR-based defaults)      |
 //+------------------------------------------------------------------+
@@ -877,6 +1105,7 @@ void DetectSessionLevels()
       if(!asianOngoing && g_asianSessionStart > 0)
       {
          TrackAsianRange();
+         ComputeAsiaProfile();
          g_asianSessionStart = 0;
       }
       if(asianOngoing && g_asianSessionStart == 0)
@@ -1010,6 +1239,10 @@ void ResetDaily()
       g_asianSessionStart = 0;
       g_asianRangeReady = false;
       g_frvpRefreshCounter = FRVP_RefreshBars; // force recompute
+      g_asiaProfileValid = false;
+      g_flowHead = -1;
+      g_lastFlowBid = 0;
+      for(int fb = 0; fb < FLOW_BINS; fb++) { g_flowBuy[fb] = 0; g_flowSell[fb] = 0; g_flowMinute[fb] = 0; }
       Print("--- Daily reset. Balance: ", g_stats.startingBalance, " ---");
    }
 
@@ -1252,6 +1485,18 @@ void UpdateComment()
    info += "Session: " + GetSessionName(g_currentSession) + "\n";
    if(g_asianRangeReady)
       info += "Asian Range: H=" + DoubleToString(g_asianHigh, 2) + " L=" + DoubleToString(g_asianLow, 2) + "\n";
+
+   //--- Asia VP info
+   if(EnableAsiaVP)
+   {
+      if(g_asiaProfileValid)
+         info += "AsiaVP: POC=" + DoubleToString(g_asiaPOC, 2) +
+                 " VAH=" + DoubleToString(g_asiaVAH, 2) +
+                 " VAL=" + DoubleToString(g_asiaVAL, 2) + "\n";
+      else
+         info += "AsiaVP: waiting for Asian close...\n";
+      info += "Flow(Buy%): " + DoubleToString(TF_BuyRatio(AsiaVP_FlowWinMin) * 100.0, 0) + "%\n";
+   }
 
    //--- FRVP info
    if(g_frvp.current.valid)
