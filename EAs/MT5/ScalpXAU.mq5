@@ -10,10 +10,10 @@
 //|  - ATR-based SL + TP with break-even + trailing                  |
 //+------------------------------------------------------------------+
 #property copyright "FXRE v3.0"
-#property version   "3.10"
+#property version   "3.20"
 #property description "XAUUSD FRVP + Price Action Scalper"
-#property description "v3.10: + Asia-VP Mode (Shadow Intel): Asian session volume profile"
-#property description "       + London sweep reversal + tick-flow confirmation"
+#property description "v3.20: + VP-Pro Mode (Syndicate/Shadow Intel fusion):"
+#property description "  Weekly VP POC/VAH/VAL + Hard S/D zones + Order Flow confluence"
 #property description "Session-gated entries at Volume Profile zones"
 #property strict
 
@@ -23,6 +23,8 @@
 #include <FixedRangeVolumeProfile.mqh>
 #include <PriceActionPatterns.mqh>
 #include <SupportResistance.mqh>
+#include <WeeklyVolumeProfile.mqh>
+#include <FXRE_SwingSD.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -94,6 +96,19 @@ input bool     EnableAsiaVP       = true;           // Asia-VP London sweep reve
 input double   AsiaVP_MinRangeATR = 2.0;            // Min Asian range to trade (xATR)
 input bool     AsiaVP_UseFlow     = true;           // Require tick-flow confirmation
 input int      AsiaVP_FlowWinMin  = 20;             // Tick-flow lookback window (minutes)
+
+//--- VP-Pro Mode (Syndicate / Shadow Intel fusion)
+input string   Inp_VPPro          = "==== VP-PRO MODE ======";
+input bool     EnableVPPro        = false;          // VP-Pro: Weekly VP + Hard S/D + Order Flow
+input double   VPPro_BucketPips   = 0.50;           // Weekly VP bucket size
+input double   VPPro_VAAPct       = 70.0;           // Weekly VP value area %
+input int      VPPro_RefreshBars  = 12;             // Recompute weekly VP every N bars
+input double   VPPro_ZoneTolATR   = 0.4;            // Zone entry tolerance (xATR)
+input double   VPPro_MinSDStr     = 3.0;            // Min S/D zone strength (1-5)
+input double   VPPro_SDProxATR    = 2.0;            // S/D zone proximity (xATR)
+input bool     VPPro_RequireFlow  = true;           // Require order flow confirmation
+input int      VPPro_FlowWinMin   = 20;             // Flow lookback (minutes)
+input double   VPPro_FlowThresh   = 0.55;           // Min buy/sell ratio to confirm
 
 //--- Session Times in GMT
 input string   Inp_Time           = "====== SESSION GMT TIMES ====";
@@ -180,6 +195,10 @@ datetime       g_flowMinute[FLOW_BINS];
 int            g_flowHead = -1;
 double         g_lastFlowBid = 0;
 
+//--- Weekly VP state (VP-Pro mode)
+WeeklyVPResult g_wvp;
+int            g_wvpRefreshCounter = 0;
+
 //+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
@@ -249,6 +268,18 @@ int OnInit()
    Print("AsiaVP: ", EnableAsiaVP ? "ON" : "OFF",
          " min_range=", AsiaVP_MinRangeATR, "xATR flow_confirm=", AsiaVP_UseFlow ? "ON" : "OFF",
          " win=", AsiaVP_FlowWinMin, "min");
+   Print("VPPro: ", EnableVPPro ? "ON" : "OFF",
+         " bucket=", VPPro_BucketPips, " VA%=", VPPro_VAAPct,
+         " minSDStr=", VPPro_MinSDStr, " flow_confirm=", VPPro_RequireFlow ? "ON" : "OFF");
+   //--- Initial weekly VP compute
+   if(EnableVPPro)
+   {
+      if(WeeklyVP_Compute(g_wvp, _Symbol, VPPro_BucketPips, VPPro_VAAPct, g_brokerGMTOffset))
+         Print("WeeklyVP | POC=", DoubleToString(g_wvp.poc, 2),
+               " VAH=", DoubleToString(g_wvp.vah, 2),
+               " VAL=", DoubleToString(g_wvp.val, 2),
+               " bars=", g_wvp.totalBars);
+   }
 
    return INIT_SUCCEEDED;
 }
@@ -302,6 +333,26 @@ void OnTick()
          if(SR_Scan(g_sr, _Symbol, EntryTF, PERIOD_M15, g_atrValue, SR_ZoneATR, SR_SwingLen))
          {
             if(DebugMode) SR_PrintLevels(g_sr.current, _Symbol);
+         }
+      }
+
+      //--- Refresh weekly VP + S/D zones for VP-Pro mode
+      if(EnableVPPro)
+      {
+         g_wvpRefreshCounter++;
+         if(g_wvpRefreshCounter >= VPPro_RefreshBars)
+         {
+            g_wvpRefreshCounter = 0;
+            if(WeeklyVP_Compute(g_wvp, _Symbol, VPPro_BucketPips, VPPro_VAAPct, g_brokerGMTOffset))
+            {
+               if(DebugMode)
+                  Print("WeeklyVP | POC=", DoubleToString(g_wvp.poc, 2),
+                        " VAH=", DoubleToString(g_wvp.vah, 2),
+                        " VAL=", DoubleToString(g_wvp.val, 2));
+            }
+            //--- Also refresh S/D zones for VP-Pro
+            DetectSwingZones(EntryTF, 500, SR_SwingLen,
+                             VPPro_SDProxATR * g_atrValue, 240, VPPro_MinSDStr);
          }
       }
 
@@ -399,10 +450,12 @@ void CheckEntry()
          CheckAsianEntry(trendDir);
          break;
       case SESS_LONDON:
+         if(EnableVPPro && CheckVPProEntry(trendDir)) break;
          if(EnableAsiaVP && CheckLondonSweepEntry(trendDir)) break;
          CheckLondonEntry(trendDir);
          break;
       case SESS_NY:
+         if(EnableVPPro && CheckVPProEntry(trendDir)) break;
          CheckNYEntry(trendDir);
          break;
    }
@@ -912,6 +965,157 @@ bool CheckLondonSweepEntry(int trendDir)
 }
 
 //+------------------------------------------------------------------+
+//| VP-PRO ENTRY: Weekly VP + Hard S/D + Order Flow confluence       |
+//| Syndicate / Shadow Intel style:                                  |
+//| 1. Weekly POC = buy zone / sell zone boundary                    |
+//| 2. Hard S/D zone must be at/near a VP level                      |
+//| 3. Tick-flow confirms direction                                  |
+//| 4. Enter at zone edge, TP at opposing VP level                   |
+//+------------------------------------------------------------------+
+bool CheckVPProEntry(int trendDir)
+{
+   if(!g_wvp.valid) return false;
+   if(!g_frvp.current.valid) return false; // need FRVP too for confluence
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, EntryTF, 0, 8, rates) < 4) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double atr = g_atrValue;
+   if(atr <= 0) return false;
+
+   double tol = VPPro_ZoneTolATR * atr;
+
+   //--- VP levels
+   double wPOC = g_wvp.poc;  // Weekly POC
+   double wVAH = g_wvp.vah;  // Weekly VAH
+   double wVAL = g_wvp.val;  // Weekly VAL
+
+   //--- FRVP levels for additional confluence
+   FRVPResult frvp = g_frvp.current;
+
+   //=== BUY: price in buy zone (near weekly POC or VAL) + demand zone + flow ===
+   bool nearPOC_buy = MathAbs(bid - wPOC) <= tol;
+   bool nearVAL_buy = MathAbs(bid - wVAL) <= tol;
+   bool inBuyZone   = bid >= wVAL - tol && bid <= wPOC + tol;
+
+   if(nearPOC_buy || nearVAL_buy || inBuyZone)
+   {
+      //--- Hard S/D: check for demand zone nearby
+      bool hasDemand = GetNearestDemandZone(bid, VPPro_SDProxATR, atr, g_swingBullish[0]);
+      bool sdNearDemand = false;
+      if(hasDemand)
+      {
+         for(int i = 0; i < g_swingBullishTotal; i++)
+         {
+            if(g_swingBullish[i].strength < VPPro_MinSDStr) continue;
+            if(bid >= g_swingBullish[i].priceLow - tol &&
+               bid <= g_swingBullish[i].priceHigh + tol * 2)
+            { sdNearDemand = true; break; }
+         }
+      }
+      //--- Also accept if price is at FRVP VAL (additional confluence)
+      bool frvpConfirm = frvp.valid && (FRVP_AtVAL(frvp, bid, tol) || FRVP_AtPOC(frvp, bid, tol));
+
+      //--- Flow confirmation
+      bool flowOk = (!VPPro_RequireFlow) || (TF_BuyRatio(VPPro_FlowWinMin) >= VPPro_FlowThresh);
+
+      //--- Trend filter
+      bool trendOk = (!PA_RequireTrend || trendDir >= 0);
+
+      //--- Need at least S/D zone OR FRVP confirmation (don't trade blind)
+      bool zoneConfirmed = sdNearDemand || frvpConfirm;
+
+      if(zoneConfirmed && flowOk && trendOk)
+      {
+         //--- TP = next VP level up (weekly VAH or FRVP VAH)
+         double tpLevel = wVAH;
+         if(frvp.valid && frvp.vah > ask && frvp.vah < wVAH)
+            tpLevel = frvp.vah; // closer target
+
+         //--- SL below the demand zone or below weekly VAL
+         double slLevel = wVAL;
+         if(sdNearDemand)
+         {
+            for(int i = 0; i < g_swingBullishTotal; i++)
+            {
+               if(g_swingBullish[i].strength < VPPro_MinSDStr) continue;
+               if(bid >= g_swingBullish[i].priceLow - tol &&
+                  bid <= g_swingBullish[i].priceHigh + tol * 2)
+               { slLevel = g_swingBullish[i].priceLow - atr * 0.3; break; }
+            }
+         }
+
+         ExecuteTrade(ORDER_TYPE_BUY, ask, atr, "VPPRO",
+                      "VPBuy_POC" + (sdNearDemand ? "+SD" : "") + (flowOk ? "+Flow" : ""),
+                      slLevel, tpLevel);
+         return true;
+      }
+   }
+
+   //=== SELL: price in sell zone (near weekly POC or VAH) + supply zone + flow ===
+   bool nearPOC_sell = MathAbs(ask - wPOC) <= tol;
+   bool nearVAH_sell = MathAbs(ask - wVAH) <= tol;
+   bool inSellZone   = ask >= wPOC - tol && ask <= wVAH + tol;
+
+   if(nearPOC_sell || nearVAH_sell || inSellZone)
+   {
+      //--- Hard S/D: check for supply zone nearby
+      bool hasSupply = GetNearestSupplyZone(ask, VPPro_SDProxATR, atr, g_swingBearish[0]);
+      bool sdNearSupply = false;
+      if(hasSupply)
+      {
+         for(int i = 0; i < g_swingBearishTotal; i++)
+         {
+            if(g_swingBearish[i].strength < VPPro_MinSDStr) continue;
+            if(ask >= g_swingBearish[i].priceLow - tol * 2 &&
+               ask <= g_swingBearish[i].priceHigh + tol)
+            { sdNearSupply = true; break; }
+         }
+      }
+      //--- Also accept if price is at FRVP VAH (additional confluence)
+      bool frvpConfirm = frvp.valid && (FRVP_AtVAH(frvp, ask, tol) || FRVP_AtPOC(frvp, ask, tol));
+
+      //--- Flow confirmation: need sell pressure
+      bool flowOk = (!VPPro_RequireFlow) || (TF_BuyRatio(VPPro_FlowWinMin) <= (1.0 - VPPro_FlowThresh));
+
+      //--- Trend filter
+      bool trendOk = (!PA_RequireTrend || trendDir <= 0);
+
+      bool zoneConfirmed = sdNearSupply || frvpConfirm;
+
+      if(zoneConfirmed && flowOk && trendOk)
+      {
+         //--- TP = next VP level down (weekly VAL or FRVP VAL)
+         double tpLevel = wVAL;
+         if(frvp.valid && frvp.val < bid && frvp.val > wVAL)
+            tpLevel = frvp.val; // closer target
+
+         //--- SL above the supply zone or above weekly VAH
+         double slLevel = wVAH;
+         if(sdNearSupply)
+         {
+            for(int i = 0; i < g_swingBearishTotal; i++)
+            {
+               if(g_swingBearish[i].strength < VPPro_MinSDStr) continue;
+               if(ask >= g_swingBearish[i].priceLow - tol * 2 &&
+                  ask <= g_swingBearish[i].priceHigh + tol)
+               { slLevel = g_swingBearish[i].priceHigh + atr * 0.3; break; }
+            }
+         }
+
+         ExecuteTrade(ORDER_TYPE_SELL, bid, atr, "VPPRO",
+                      "VPSell_POC" + (sdNearSupply ? "+SD" : "") + (flowOk ? "+Flow" : ""),
+                      slLevel, tpLevel);
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Execute a trade with risk-based sizing                           |
 //| srSL/srTP = S/R-derived levels (0 = use ATR-based defaults)      |
 //+------------------------------------------------------------------+
@@ -1243,6 +1447,8 @@ void ResetDaily()
       g_flowHead = -1;
       g_lastFlowBid = 0;
       for(int fb = 0; fb < FLOW_BINS; fb++) { g_flowBuy[fb] = 0; g_flowSell[fb] = 0; g_flowMinute[fb] = 0; }
+      g_wvpRefreshCounter = 0;
+      if(EnableVPPro) WeeklyVP_Compute(g_wvp, _Symbol, VPPro_BucketPips, VPPro_VAAPct, g_brokerGMTOffset);
       Print("--- Daily reset. Balance: ", g_stats.startingBalance, " ---");
    }
 
@@ -1495,8 +1701,17 @@ void UpdateComment()
                  " VAL=" + DoubleToString(g_asiaVAL, 2) + "\n";
       else
          info += "AsiaVP: waiting for Asian close...\n";
-      info += "Flow(Buy%): " + DoubleToString(TF_BuyRatio(AsiaVP_FlowWinMin) * 100.0, 0) + "%\n";
    }
+   //--- VP-Pro info
+   if(EnableVPPro && g_wvp.valid)
+   {
+      info += "VPPro: WPOC=" + DoubleToString(g_wvp.poc, 2) +
+              " WVAH=" + DoubleToString(g_wvp.vah, 2) +
+              " WVAL=" + DoubleToString(g_wvp.val, 2) + "\n";
+      info += "SD Zones: D=" + IntegerToString(g_swingBullishTotal) +
+              " S=" + IntegerToString(g_swingBearishTotal) + "\n";
+   }
+   info += "Flow(Buy%): " + DoubleToString(TF_BuyRatio(AsiaVP_FlowWinMin) * 100.0, 0) + "%\n";
 
    //--- FRVP info
    if(g_frvp.current.valid)
