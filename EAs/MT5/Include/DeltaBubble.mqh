@@ -54,7 +54,8 @@ public:
       DeltaBubbleData data = {};
       
       // Get tick volumes and directions
-      double close[], open[], high[], low[], tickVol[];
+      double close[], open[], high[], low[];
+      long tickVol[];
       ArraySetAsSeries(close, true);
       ArraySetAsSeries(open, true);
       ArraySetAsSeries(high, true);

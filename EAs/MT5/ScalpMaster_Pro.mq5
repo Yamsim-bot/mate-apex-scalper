@@ -394,7 +394,8 @@ void ComputeVP()
 {
    gVPValid = false;
    
-   double hi[], lo[], cl[], vol[];
+   double hi[], lo[], cl[];
+   long vol[];
    ArraySetAsSeries(hi, true);
    ArraySetAsSeries(lo, true);
    ArraySetAsSeries(cl, true);

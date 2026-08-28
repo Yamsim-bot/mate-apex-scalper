@@ -110,7 +110,8 @@ VPResult ComputeVP(string symbol, ENUM_TIMEFRAMES tf, int startBar, int numBars)
    VPResult result;
    result.valid = false;
    
-   double high[], low[], close[], volume[];
+   double high[], low[], close[];
+   long volume[];
    ArraySetAsSeries(high, true);
    ArraySetAsSeries(low, true);
    ArraySetAsSeries(close, true);

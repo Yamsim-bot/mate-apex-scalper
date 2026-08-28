@@ -14,3 +14,5 @@
 !EAs/**
 !signal_radar/
 !signal_radar/**
+EAs/MT5/*.ex5
+EAs/MT5/*.log
