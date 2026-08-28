@@ -1,12 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                            ScalpMaster_Pro.mq5     |
-//|                          Professional Scalping EA v2.0             |
-//|                          Volume Profile + S/D + Order Flow         |
+//|                          Professional Scalping EA v3.0             |
+//|                          VP + S/D + Order Flow + Delta Bubble      |
 //+------------------------------------------------------------------+
 #property copyright "YAMSTUNNA Trading Systems"
 #property link      ""
-#property version   "2.00"
+#property version   "3.00"
 #property strict
+
+#include <DeltaBubble.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                   |
@@ -38,6 +40,14 @@ input string   Inp_OF             = "======== ORDER FLOW ========";
 input double   OF_BuyMin         = 0.60;       // Min buy ratio for longs
 input double   OF_SellMin        = 0.40;       // Min sell ratio for shorts
 input int      OF_Bars           = 3;          // Flow lookback bars
+
+input string   Inp_Delta          = "======== DELTA BUBBLE ========";
+input bool     EnableDeltaBubble = true;       // Enable Delta Bubble confluence
+input double   Delta_MinBubble    = 100.0;     // Min bubble size for significance
+input double   Delta_AbsorbThresh = 2.5;       // Absorption threshold multiplier
+input double   Delta_ShiftThresh  = 0.5;       // Delta shift sensitivity
+input int      Delta_Lookback     = 5;         // Lookback bars for delta calc
+input int      Delta_MinStrength  = 4;         // Min bubble strength for entry
 
 input string   Inp_Risk           = "======== RISK ========";
 input double   SL_ATR            = 1.2;        // SL (xATR)
@@ -72,6 +82,11 @@ struct Zone { double top; double bottom; double mid; double str; bool supply; bo
 Zone gSupply[], gDemand[];
 int gSupplyCnt, gDemandCnt;
 
+// Delta Bubble
+DeltaBubbleEngine *gDeltaEngine = NULL;
+DeltaBubbleData gDeltaData;
+string gDeltaDesc = "";
+
 //+------------------------------------------------------------------+
 //| INIT                                                               |
 //+------------------------------------------------------------------+
@@ -85,14 +100,28 @@ int OnInit()
    gSupplyCnt = 0;
    gDemandCnt = 0;
    
-   Print("=== ScalpMaster Pro v2.0 | Magic:", MagicNumber, " ===");
+   // Initialize Delta Bubble engine
+   if(EnableDeltaBubble)
+   {
+      gDeltaEngine = new DeltaBubbleEngine(Delta_MinBubble, Delta_AbsorbThresh, 
+                                            Delta_ShiftThresh, Delta_Lookback);
+      Print("Delta Bubble: ON minBubble=", Delta_MinBubble, 
+            " absorbThresh=", Delta_AbsorbThresh, 
+            " minStr=", Delta_MinStrength);
+   }
+   
+   Print("=== ScalpMaster Pro v3.0 | Magic:", MagicNumber, " ===");
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
 //| DEINIT                                                             |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason) { Comment(""); }
+void OnDeinit(const int reason)
+{
+   if(gDeltaEngine != NULL) delete gDeltaEngine;
+   Comment("");
+}
 
 //+------------------------------------------------------------------+
 //| TICK                                                               |
@@ -295,38 +324,63 @@ void CheckEntry()
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double tol = gATR * VP_TolATR;
    
-   // Order flow
+   // Basic order flow
    double buyP = 0, sellP = 0;
    GetFlow(buyP, sellP);
    
-   // BUY: at POC/VAL + demand zone + buy flow
+   // Delta Bubble confluence
+   bool deltaBuy = true, deltaSell = true;
+   int deltaStr = 5;
+   gDeltaDesc = "";
+   
+   if(EnableDeltaBubble && gDeltaEngine != NULL)
+   {
+      gDeltaData = gDeltaEngine.Calculate(_Symbol, EntryTF);
+      deltaBuy = gDeltaEngine.ConfirmsBuy(gDeltaData);
+      deltaSell = gDeltaEngine.ConfirmsSell(gDeltaData);
+      deltaStr = gDeltaEngine.GetBubbleStrength(gDeltaData);
+      gDeltaDesc = gDeltaEngine.GetDescription(gDeltaData);
+      
+      // If Delta Bubble enabled, require it for entry
+      if(deltaStr < Delta_MinStrength)
+      {
+         deltaBuy = false;
+         deltaSell = false;
+      }
+   }
+   
+   // BUY: at POC/VAL + demand zone + buy flow + delta confirm
    bool atPOC = MathAbs(price - gPOC) < tol;
    bool atVAL = MathAbs(price - gVAL) < tol;
    
-   if((atPOC || atVAL) && buyP >= OF_BuyMin)
+   if((atPOC || atVAL) && buyP >= OF_BuyMin && deltaBuy)
    {
       for(int i = 0; i < gDemandCnt; i++)
       {
          if(!gDemand[i].active) continue;
          if(price >= gDemand[i].bottom && price <= gDemand[i].top && gDemand[i].str >= SD_MinStrength)
          {
-            SendBuy(price, atPOC ? "POC" : "VAL", gDemand[i].str, buyP);
+            string reason = StringFormat("%s str=%.0f", atPOC ? "POC" : "VAL", gDemand[i].str);
+            if(EnableDeltaBubble) reason += StringFormat(" DStr=%d %s", deltaStr, gDeltaDesc);
+            SendBuy(price, reason, gDemand[i].str + deltaStr * 0.1, buyP);
             return;
          }
       }
    }
    
-   // SELL: at POC/VAH + supply zone + sell flow
+   // SELL: at POC/VAH + supply zone + sell flow + delta confirm
    bool atVAH = MathAbs(price - gVAH) < tol;
    
-   if((atPOC || atVAH) && sellP >= (1.0 - OF_SellMin))
+   if((atPOC || atVAH) && sellP >= (1.0 - OF_SellMin) && deltaSell)
    {
       for(int i = 0; i < gSupplyCnt; i++)
       {
          if(!gSupply[i].active) continue;
          if(price >= gSupply[i].bottom && price <= gSupply[i].top && gSupply[i].str >= SD_MinStrength)
          {
-            SendSell(price, atVAH ? "VAH" : "POC", gSupply[i].str, sellP);
+            string reason = StringFormat("%s str=%.0f", atVAH ? "VAH" : "POC", gSupply[i].str);
+            if(EnableDeltaBubble) reason += StringFormat(" DStr=%d %s", deltaStr, gDeltaDesc);
+            SendSell(price, reason, gSupply[i].str + deltaStr * 0.1, sellP);
             return;
          }
       }
@@ -598,13 +652,24 @@ bool ModTicket(ulong ticket, double sl, double tp)
 //+------------------------------------------------------------------+
 void ShowComment()
 {
-   string c = "=== ScalpMaster Pro v2.0 ===\n";
+   string c = "=== ScalpMaster Pro v3.0 ===\n";
    c += StringFormat("ATR: %.2f | Pos: %d/%d | Trades: %d/%d\n",
                      gATR, CountPos(), MaxPositions, gDayTrades, MaxTradesPerDay);
    c += StringFormat("Daily P/L: $%.2f\n", gDailyPnL);
    if(gVPValid)
       c += StringFormat("VP: POC=%.2f VAH=%.2f VAL=%.2f\n", gPOC, gVAH, gVAL);
    c += StringFormat("S/D: %d supply, %d demand\n", gSupplyCnt, gDemandCnt);
+   
+   if(EnableDeltaBubble && gDeltaEngine != NULL)
+   {
+      c += StringFormat("Delta: %.0f | Ratio: %.2f | Bubbles: %d\n",
+                        gDeltaData.delta, gDeltaData.deltaRatio, gDeltaData.bubbleCount);
+      if(gDeltaData.absorption) c += ">> ABSORPTION DETECTED <<\n";
+      if(gDeltaData.deltaShift) c += ">> DELTA SHIFT <<\n";
+      if(gDeltaData.strongBuy) c += ">> STRONG BUY PRESSURE <<\n";
+      if(gDeltaData.strongSell) c += ">> STRONG SELL PRESSURE <<\n";
+   }
+   
    Comment(c);
 }
 //+------------------------------------------------------------------+
