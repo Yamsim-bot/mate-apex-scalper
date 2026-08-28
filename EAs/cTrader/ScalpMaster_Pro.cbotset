@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<cBotSettings assembly="cAlgo.Robots" type="cAlgo.Robots.ScalpMaster_Pro">
+  <Parameter name="RiskPerTradePct" value="0.5" />
+  <Parameter name="MaxDailyLossPct" value="2.0" />
+  <Parameter name="MaxPositions" value="1" />
+  <Parameter name="MaxTradesPerDay" value="5" />
+  <Parameter name="EntryTF" value="Minute5" />
+  <Parameter name="HTF" value="Hour1" />
+  <Parameter name="VP_Bars" value="100" />
+  <Parameter name="VP_BucketPips" value="0.25" />
+  <Parameter name="VP_VAAPct" value="70.0" />
+  <Parameter name="VP_TolATR" value="0.3" />
+  <Parameter name="SD_SwingLen" value="3" />
+  <Parameter name="SD_MinStrength" value="2.0" />
+  <Parameter name="OF_BuyMin" value="0.60" />
+  <Parameter name="OF_Bars" value="3" />
+  <Parameter name="SL_ATR" value="1.2" />
+  <Parameter name="TP_ATR" value="2.0" />
+  <Parameter name="MinRR" value="1.5" />
+  <Parameter name="UseBE" value="true" />
+  <Parameter name="BE_TriggerATR" value="0.8" />
+  <Parameter name="UseTrail" value="true" />
+  <Parameter name="TrailStartATR" value="1.0" />
+  <Parameter name="TrailStepATR" value="0.3" />
+  <Parameter name="LondonStart" value="7" />
+  <Parameter name="LondonEnd" value="10" />
+  <Parameter name="NYStart" value="13" />
+  <Parameter name="NYEnd" value="16" />
+</cBotSettings>
