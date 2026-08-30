@@ -1,0 +1,6 @@
+; FXPair_EA v2.1 Settings
+; Multi-factor Confluence
+RiskPerTradePct=0.5
+MaxDailyRiskPct=2.0
+MaxPositions=1
+MinRR=2.0

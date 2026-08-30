@@ -1,0 +1,8 @@
+; VolumeProfile_Confluence EA Settings
+; VP + HTF S/D + Order Flow
+RiskPerTradePct=0.5
+MaxDailyRiskPct=2.0
+MaxPositions=1
+MinRR=2.0
+SL_ATR=1.5
+TP_ATR=3.0

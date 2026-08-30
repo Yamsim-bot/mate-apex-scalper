@@ -1,0 +1,5 @@
+; FXYAMS_Ultimate1 Settings
+; Swing Trading
+RiskPerTradePct=0.5
+MaxDailyRiskPct=2.0
+MaxPositions=1

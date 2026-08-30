@@ -1,0 +1,5 @@
+; FXRE_Hybrid Settings
+; Swing S/D Zones
+RiskPerTradePct=0.5
+MaxDailyRiskPct=2.0
+MaxPositions=1

@@ -1,0 +1,5 @@
+; ScalpMaster Settings
+; RSI + S/R + Price Action
+RiskPerTradePct=0.5
+MaxDailyRiskPct=2.0
+MaxPositions=1
