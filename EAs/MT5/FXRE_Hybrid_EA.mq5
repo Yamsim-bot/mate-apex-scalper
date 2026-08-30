@@ -62,7 +62,7 @@ input double   BreakEven_ATR         = 0.8;    // Move SL after X*ATR profit
 input double   FixedLotPer2k         = 0.01;   // Fallback lot per $2k
 
 //--- Safety Limits
-input int      MaxPositions          = 2;      // Max positions
+input int      MaxPositions          = 1;      // Max positions (was 2)
 input int      MaxDailyTrades        = 15;     // Max trades per day (10-15 for scalp)
 input double   MaxDailyLossPct       = 3.0;    // Stop trading at this loss %
 input int      MaxTPHits             = 5;      // Pause after X TPs hit PER SESSION

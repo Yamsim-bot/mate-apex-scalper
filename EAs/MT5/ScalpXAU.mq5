@@ -36,7 +36,7 @@ input double   MaxDailyRiskPct    = 2.0;
 input double   MaxSessDDPct       = 1.5;
 input int      MaxTradesPerSess   = 5;
 input int      MaxPositions       = 1;
-input int      BrokerGMTOffset    = -99;
+input int      BrokerGMTOffset    = 2;  // Vantage broker GMT+2
 input bool     DebugMode          = false;
 
 //--- Timeframes

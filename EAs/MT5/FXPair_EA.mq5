@@ -209,7 +209,7 @@ input double   FixedLot            = 0.01;         // Fixed lot fallback
 
 //--- Safety
 
-input int      MaxPositionsPerPair = 2;            // Max positions per symbol (was 1)
+input int      MaxPositionsPerPair = 1;            // Max positions per symbol (was 2)
 
 input int      MaxGlobalPositions  = 6;            // Max total open positions (was 4)
 

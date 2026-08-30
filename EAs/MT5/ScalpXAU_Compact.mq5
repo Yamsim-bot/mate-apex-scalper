@@ -27,7 +27,7 @@ input double   RiskPerTradePct    = 0.5;
 input double   MaxDailyRiskPct    = 2.0;
 input int      MaxTradesPerSess   = 3;
 input int      MaxPositions       = 1;
-input int      BrokerGMTOffset    = -99;
+input int      BrokerGMTOffset    = 2;
 input bool     DebugMode          = false;
 
 //--- Timeframes
