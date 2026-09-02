@@ -78,6 +78,8 @@ input double   TrailStart_ATR     = 0.8;
 input double   TrailStep_ATR      = 0.3;
 input int      MaxSlippagePts     = 30;
 input double   Min_SL_ATR         = 1.0;
+input double   MaxLotSize         = 0.05;   // Hard max lot size (safety cap)
+input int      CooldownSeconds    = 300;    // Minimum seconds between trades (5 min)
 input int      MagicNumber        = 241107;
 input string   CommentPrefix      = "SCALPX_EA";
 
@@ -174,6 +176,7 @@ datetime       g_lastEntryBarTime = 0;
 int            g_tickCount = 0;
 string         g_commentPrefix = "XAU";
 int            g_frvpRefreshCounter = 0;
+datetime       g_lastTradeTime = 0;   // Cooldown timer
 
 //--- Broker GMT offset
 int            g_brokerGMTOffset = 0;
@@ -432,6 +435,18 @@ void CheckEntry()
    }
    if(g_stats.sessTradingStopped) return;
    if(g_stats.sessionTradeCount >= MaxTradesPerSess) return;
+
+   //--- Cooldown: minimum time between trades
+   if(g_lastTradeTime > 0 && (TimeCurrent() - g_lastTradeTime) < CooldownSeconds)
+   {
+      static datetime lastCooldownWarn = 0;
+      if(TimeCurrent() - lastCooldownWarn >= 60)
+      {
+         lastCooldownWarn = TimeCurrent();
+         Print("COOLDOWN: Waiting ", CooldownSeconds - (int)(TimeCurrent() - g_lastTradeTime), "s");
+      }
+      return;
+   }
 
    //--- Need FRVP valid for entries
    if(!g_frvp.current.valid)
@@ -1181,6 +1196,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
          {
             g_stats.tradeCount++;
             g_stats.sessionTradeCount++;
+            g_lastTradeTime = TimeCurrent();
             Print("FRVP BUY ", sessionTag, ": ", paTag,
                   " price=", DoubleToString(entryPrice, digits),
                   " SL=", DoubleToString(sl, digits),
@@ -1238,6 +1254,7 @@ void ExecuteTrade(int orderType, double entryPrice, double atr,
          {
             g_stats.tradeCount++;
             g_stats.sessionTradeCount++;
+            g_lastTradeTime = TimeCurrent();
             Print("FRVP SELL ", sessionTag, ": ", paTag,
                   " price=", DoubleToString(entryPrice, digits),
                   " SL=", DoubleToString(sl, digits),
@@ -1400,7 +1417,11 @@ double CalcATR(int period, ENUM_TIMEFRAMES tf)
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, tf, 0, period + 1, rates) < period + 1) return 0;
+   if(CopyRates(_Symbol, tf, 0, period + 1, rates) < period + 1)
+   {
+      Print("CalcATR: Not enough bars (", CopyRates(_Symbol, tf, 0, period + 1, rates), "/", period + 1, ")");
+      return 0;
+   }
    double sum = 0;
    for(int i = 1; i <= period; i++)
    {
@@ -1410,7 +1431,14 @@ double CalcATR(int period, ENUM_TIMEFRAMES tf)
                            MathAbs(rates[i].low - rates[i-1].close)));
       sum += tr;
    }
-   return sum / period;
+   double atr = sum / period;
+   //--- Safety floor: minimum 1.0 pt ATR to prevent division by zero
+   if(atr < 1.0)
+   {
+      Print("CalcATR: ATR too low (", DoubleToString(atr, 2), "), using floor 1.0");
+      return 1.0;
+   }
+   return atr;
 }
 
 bool IsNewBar()
@@ -1609,6 +1637,8 @@ double CalcLotSizeRisk(double slDist, double riskPct)
    double hardCap = NormalizeDouble(m_account.Balance() / 10000.0 * 1.0, 2);
    if(vstep > 0) hardCap = MathFloor(hardCap / vstep + 1e-9) * vstep;
    if(hardCap >= minVol && hardCap < cappedLot) cappedLot = hardCap;
+   //--- Safety cap: MaxLotSize from inputs
+   if(cappedLot > MaxLotSize) cappedLot = MaxLotSize;
    return cappedLot;
 }
 

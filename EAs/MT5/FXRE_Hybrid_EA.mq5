@@ -60,6 +60,7 @@ input double   BreakEven_ATR         = 0.8;    // Move SL after X*ATR profit
 
 //--- Lot Sizing (fallback if risk% can't compute)
 input double   FixedLotPer2k         = 0.01;   // Fallback lot per $2k
+input double   MaxLotSize            = 0.05;   // Hard max lot size (safety cap)
 
 //--- Safety Limits
 input int      MaxPositions          = 1;      // Max positions (was 2)
@@ -67,6 +68,7 @@ input int      MaxDailyTrades        = 15;     // Max trades per day (10-15 for 
 input double   MaxDailyLossPct       = 3.0;    // Stop trading at this loss %
 input int      MaxTPHits             = 5;      // Pause after X TPs hit PER SESSION
 input bool     ResetOnNewSession    = true;   // Reset TP counter on new session
+input int      CooldownSeconds       = 300;    // Minimum seconds between trades (5 min)
 
 //--- Trading Session (PH Time = UTC+8)
 input bool     UseSessionFilter      = false;
@@ -102,6 +104,7 @@ int    g_signalBarTime = 0;
 datetime g_lastScanTime = 0;
 ENUM_ORDER_TYPE_FILLING g_fillMode = ORDER_FILLING_IOC;
 int    g_heartbeatCount = 0;
+datetime g_lastTradeTime = 0;   // Cooldown timer
 
 #include "..\Include\FXRE_SwingSD.mqh"
 #include "..\Include\FXRE_SessionFilter.mqh"
@@ -360,7 +363,11 @@ double CalcATR(int period, ENUM_TIMEFRAMES tf)
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    int copied = CopyRates(_Symbol, tf, 0, period + 2, rates);
-   if(copied < period + 1) return 0;
+   if(copied < period + 1)
+   {
+      Print("CalcATR: Not enough bars copied (", copied, "/", period + 2, ")");
+      return 0;
+   }
    double sum = 0;
    for(int i = 0; i < period; i++)
    {
@@ -369,7 +376,14 @@ double CalcATR(int period, ENUM_TIMEFRAMES tf)
                  MathAbs(rates[i].low - rates[i+1].close)));
       sum += tr;
    }
-   return sum / period;
+   double atr = sum / period;
+   //--- Safety floor: minimum 1.0 pt ATR to prevent division by zero
+   if(atr < 1.0)
+   {
+      Print("CalcATR: ATR too low (", DoubleToString(atr, 2), "), using floor 1.0");
+      return 1.0;
+   }
+   return atr;
 }
 
 //+------------------------------------------------------------------+
@@ -432,6 +446,9 @@ double CalcRiskLot(double slDistancePts)
       if(step > 0) maxVol = MathFloor(maxVol / step) * step;
       lot = MathMin(lot, maxVol);
    }
+
+   //--- Hard cap: MaxLotSize from inputs (safety)
+   lot = MathMin(lot, MaxLotSize);
 
    lot = MathMin(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
    return MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
@@ -732,15 +749,17 @@ void CheckHybridEntry()
          if(slDistPts >= 0.5 * g_atrValueM5 / _Point)
          {
             double tp = NormalizeDouble(ask + slDistPts * 1.5 * _Point, digits);
-            double lot = CalcRiskLot(slDistPts);
-            if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_BUY, lot, ask, sl, tp,
-               CommentPrefix + "_SCALP_BUY"))
-            {
-               g_signalBarTime = (int)ratesM5[0].time;
-               g_hybridDaily.tradeCount++;
-               Print("SCALP BUY: ", _Symbol, " range=", DoubleToString(range0 / g_atrValueM5, 2), "xATR");
-               return;
-            }
+      double lot = CalcRiskLot(slDistPts);
+      lot = MathMin(lot, MaxLotSize);  //--- Safety cap
+      if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_BUY, lot, ask, sl, tp,
+         CommentPrefix + "_SCALP_BUY"))
+      {
+         g_signalBarTime = (int)ratesM5[0].time;
+         g_lastTradeTime = TimeCurrent();
+         g_hybridDaily.tradeCount++;
+         Print("SCALP BUY: ", _Symbol, " range=", DoubleToString(range0 / g_atrValueM5, 2), "xATR", " lot=", lot);
+         return;
+      }
          }
       }
 
@@ -758,15 +777,17 @@ void CheckHybridEntry()
          if(slDistPts >= 0.5 * g_atrValueM5 / _Point)
          {
             double tp = NormalizeDouble(bid - slDistPts * 1.5 * _Point, digits);
-            double lot = CalcRiskLot(slDistPts);
-            if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_SELL, lot, bid, sl, tp,
-               CommentPrefix + "_SCALP_SELL"))
-            {
-               g_signalBarTime = (int)ratesM5[0].time;
-               g_hybridDaily.tradeCount++;
-               Print("SCALP SELL: ", _Symbol, " range=", DoubleToString(range0 / g_atrValueM5, 2), "xATR");
-               return;
-            }
+      double lot = CalcRiskLot(slDistPts);
+      lot = MathMin(lot, MaxLotSize);  //--- Safety cap
+      if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_SELL, lot, bid, sl, tp,
+         CommentPrefix + "_SCALP_SELL"))
+      {
+         g_signalBarTime = (int)ratesM5[0].time;
+         g_lastTradeTime = TimeCurrent();
+         g_hybridDaily.tradeCount++;
+         Print("SCALP SELL: ", _Symbol, " range=", DoubleToString(range0 / g_atrValueM5, 2), "xATR", " lot=", lot);
+         return;
+      }
          }
       }
 
@@ -903,11 +924,13 @@ void CheckHybridEntry()
       }
 
       double lot = CalcRiskLot(slDistPts);
+      lot = MathMin(lot, MaxLotSize);  //--- Safety cap
 
       if(OpenOrderHybrid(ORDER_TYPE_BUY, lot, ask, sl, tp,
          CommentPrefix + "_BUY_Z" + DoubleToString(nearDemand.strength, 1)))
       {
          g_signalBarTime = (int)ratesM5[0].time;
+         g_lastTradeTime = TimeCurrent();
          g_hybridDaily.tradeCount++;
          Print("BUY CONFIRMED: ", _Symbol, " SL=", DoubleToString(slDistATR, 2), "xATR",
                " RR=", DoubleToString(rr, 2), " Lot=", lot, " Zones: D=", g_swingBullishTotal, " S=", g_swingBearishTotal);
@@ -944,11 +967,13 @@ void CheckHybridEntry()
       }
 
       double lot = CalcRiskLot(slDistPts);
+      lot = MathMin(lot, MaxLotSize);  //--- Safety cap
 
       if(OpenOrderHybrid(ORDER_TYPE_SELL, lot, bid, sl, tp,
          CommentPrefix + "_SELL_Z" + DoubleToString(nearSupply.strength, 1)))
       {
          g_signalBarTime = (int)ratesM5[0].time;
+         g_lastTradeTime = TimeCurrent();
          g_hybridDaily.tradeCount++;
          Print("SELL CONFIRMED: ", _Symbol, " SL=", DoubleToString(slDistATR, 2), "xATR",
                " RR=", DoubleToString(rr, 2), " Lot=", lot, " Zones: D=", g_swingBullishTotal, " S=", g_swingBearishTotal);
@@ -1041,6 +1066,18 @@ void OnTick()
    if(openPos >= MaxPositions)
    { UpdateComment(); return; }
 
+   //--- Cooldown: minimum time between trades
+   if(g_lastTradeTime > 0 && (TimeCurrent() - g_lastTradeTime) < CooldownSeconds)
+   {
+      static datetime lastCooldownWarn = 0;
+      if(TimeCurrent() - lastCooldownWarn >= 60)
+      {
+         lastCooldownWarn = TimeCurrent();
+         Print("COOLDOWN: Waiting ", CooldownSeconds - (int)(TimeCurrent() - g_lastTradeTime), "s");
+      }
+      UpdateComment(); return;
+   }
+
    //--- Can we trade?
    bool canTrade = CanTradeHybrid();
    bool inSession = HybridShouldTrade();
@@ -1088,7 +1125,8 @@ void OnTick()
             " Eq=$", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2),
             " Pos=", openPos, " Trades=", g_hybridDaily.tradeCount,
             " Zones: D=", g_swingBullishTotal, " S=", g_swingBearishTotal,
-            " ATR: M15=", DoubleToString(g_atrValue,1), " M5=", DoubleToString(g_atrValueM5,1));
+            " ATR: M15=", DoubleToString(g_atrValue,1), " M5=", DoubleToString(g_atrValueM5,1),
+            " Cooldown: ", CooldownSeconds, "s | MaxLot: ", MaxLotSize);
    }
 
    //--- Check entry signals
