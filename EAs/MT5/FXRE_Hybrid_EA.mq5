@@ -13,13 +13,13 @@
 //|  7. Auto-detect broker fill mode (was hardcoded IOC)              |
 //+------------------------------------------------------------------+
 #property copyright "FXRE Replication Project"
-#property version   "2.00"
-#property description "FXRE Hybrid v2.0: AGV S&D zones + tightened risk + partial TP"
+#property version   "2.10"
+#property description "FXRE Hybrid v2.1: Fixed lot cap + improved trailing + breakeven after partial TP"
 
-//--- Scalp Mode (v3.0)
+//--- Scalp Mode (v3.1 — IMPROVED)
 input bool     ScalpMode           = true;       // Enable scalp mode (aggressive entries)
-input double   Scalp_BreakoutATR   = 0.20;       // Min breakout range (xATR)
-input int      Scalp_BreakoutBars  = 2;          // Lookback bars for breakout
+input double   Scalp_BreakoutATR   = 0.25;       // Min breakout range (xATR, was 0.20 — too tight)
+input int      Scalp_BreakoutBars  = 3;          // Lookback bars for breakout (was 2 — too few)
 
 //--- Swing S&D Parameters
 input int      Swing_LookbackCandles = 1000;  // Scan depth for swings
@@ -37,26 +37,29 @@ input double   ZoneProximityATR      = 2.0;   // Max distance from zone (xATR, w
 input bool     UseTrendFilter        = false;
 input int      TrendFilterMAPeriod   = 200;   // EMA for trend direction
 
-//--- Risk Management
-input double   RiskPerTradePct       = 0.5;   // % risk per trade (was 1.0)
-input double   SL_BufferATR          = 0.3;   // SL behind zone (x ATR, was 1.2)
-input double   TP_Multiplier         = 1.5;   // TP = zone_width * mult (was 2.0)
-input double   TP_MinATR             = 0.6;   // Min TP (x ATR, was 0.8)
-input double   Min_RR                = 1.0;   // Minimum reward:risk (anti-bleed: >= 1:1, TP is stretched to hold)
+//--- Risk Management (IMPROVED — wider SL for gold volatility)
+input double   RiskPerTradePct       = 0.3;   // % risk per trade (was 0.5 — too aggressive)
+input double   SL_BufferATR          = 0.5;   // SL behind zone (x ATR, was 0.3 — too tight for gold)
+input double   TP_Multiplier         = 2.0;   // TP = zone_width * mult (was 1.5 — improved RR)
+input double   TP_MinATR             = 0.8;   // Min TP (x ATR, was 0.6)
+input double   Min_RR                = 1.5;   // Minimum reward:risk (was 1.0 — need better RR)
 
-//--- Partial Take-Profit
+//--- Partial Take-Profit (IMPROVED — tighter trigger, better protection)
 input bool     UsePartialTP          = true;   // Enable partial take profit
-input double   PartialTP_Pct         = 60.0;   // Partial TP at X% of full TP distance
+input double   PartialTP_Pct         = 40.0;   // Partial TP at X% of full TP distance (was 60% — too late)
 input double   PartialClosePct       = 50.0;   // Close X% of position at partial TP
+input bool     PartialAlreadyDone    = false;  // Track if partial already closed for this position
 
-//--- Trailing Stop
+//--- Trailing Stop (IMPROVED — tighter trail, earlier start)
 input bool     UseTrailing           = true;   // Trail after partial TP
-input double   TrailingStart_ATR     = 0.6;    // Start trailing after X*ATR profit
-input double   TrailingStep_ATR      = 0.25;   // Trailing step distance (xATR)
+input double   TrailingStart_ATR     = 0.35;   // Start trailing after X*ATR profit (was 0.6 — too late)
+input double   TrailingStep_ATR      = 0.15;   // Trailing step distance (xATR, was 0.25 — too wide)
+input bool     TrailAfterPartial     = true;   // Tighter trail after partial TP hit
 
-//--- Break-Even
+//--- Break-Even (IMPROVED — move sooner, protect after partial)
 input bool     UseBreakEven          = true;   // Move SL to breakeven
-input double   BreakEven_ATR         = 0.8;    // Move SL after X*ATR profit
+input double   BreakEven_ATR         = 0.4;    // Move SL after X*ATR profit (was 0.8 — too late)
+input double   BreakEvenBuffer_Pts   = 10;     // Buffer above/below entry (points)
 
 //--- Lot Sizing (fallback if risk% can't compute)
 input double   FixedLotPer2k         = 0.01;   // Fallback lot per $2k
@@ -412,54 +415,83 @@ double CalcEMA(ENUM_TIMEFRAMES tf, int period)
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size from risk % + SL distance                     |
+//| Calculate lot size from risk % + SL distance — CONSERVATIVE       |
 //+------------------------------------------------------------------+
 double CalcRiskLot(double slDistancePts)
 {
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   
    if(slDistancePts <= 0)
    {
-      double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-      double lot = (bal / 2000.0) * FixedLotPer2k;
-      lot = MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
-      double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      //--- Fallback: fixed lot based on balance
+      double lot = MathMin(balance / 50000.0, 0.01);  // Very conservative fallback
+      lot = MathMax(lot, minVol);
       if(step > 0) lot = MathFloor(lot / step) * step;
-      return MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+      return lot;
    }
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   //--- Risk-based calculation
    double riskAmount = balance * (RiskPerTradePct / 100.0);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickValue <= 0 || tickSize <= 0) return 0.01;
+   if(tickValue <= 0 || tickSize <= 0) return minVol;
 
    double lot = riskAmount / (slDistancePts * tickValue);
-   lot = MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(step > 0) lot = MathFloor(lot / step) * step;
-
-   //--- Notional cap: ~$30k exposure per $10k balance (~7 oz at current gold).
-   //--- Prevents risk-based sizing on a wide zone stop from blowing margin.
+   
+   //--- Notional cap: $15k exposure per $10k balance (was $30k — too aggressive)
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(price > 0)
    {
-      double maxVol = (balance / 10000.0) * 30000.0 / price;
+      double maxVol = (balance / 10000.0) * 15000.0 / price;
       if(step > 0) maxVol = MathFloor(maxVol / step) * step;
       lot = MathMin(lot, maxVol);
    }
 
-   //--- Hard cap: MaxLotSize from inputs (safety)
+   //--- Balance-based cap: max 0.01 per $10k (extreme safety)
+   double balanceCap = balance / 10000.0 * 0.01;
+   lot = MathMin(lot, balanceCap);
+
+   //--- Hard cap: MaxLotSize from inputs (SAFETY — never exceed)
    lot = MathMin(lot, MaxLotSize);
 
+   //--- Normalize
    lot = MathMin(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
-   return MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+   lot = MathMax(lot, minVol);
+   if(step > 0) lot = MathFloor(lot / step) * step;
+   
+   return lot;
 }
 
 //+------------------------------------------------------------------+
-//| Send market order (auto fill mode)                                |
+//| Send market order (auto fill mode) — WITH SAFETY CAP             |
 //+------------------------------------------------------------------+
 bool OpenOrderHybrid(int type, double volume, double price,
                      double sl, double tp, string comment)
 {
+   //--- FINAL SAFETY CAP: Never exceed MaxLotSize under any circumstances
+   double maxVol = MathMin(MaxLotSize, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   volume = MathMin(volume, maxVol);
+   volume = MathMax(volume, minVol);
+   if(step > 0) volume = MathFloor(volume / step) * step;
+   
+   //--- Extra safety: if balance < $5000, cap at 0.02
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance < 5000)
+      volume = MathMin(volume, 0.02);
+   else if(balance < 10000)
+      volume = MathMin(volume, 0.03);
+   
+   if(volume < minVol)
+   {
+      Print("ORDER BLOCKED: Volume ", volume, " below minimum ", minVol);
+      return false;
+   }
+
    MqlTradeRequest request = {};
    MqlTradeResult  result  = {};
 
@@ -482,7 +514,8 @@ bool OpenOrderHybrid(int type, double volume, double price,
          Print("ORDER: ", (type == ORDER_TYPE_BUY ? "BUY" : "SELL"),
                " Lot=", volume, " @ ", price,
                " SL=", DoubleToString(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
-               " TP=", DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+               " TP=", DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+               " MaxLot=", MaxLotSize, " Bal=", DoubleToString(balance, 0));
          return true;
       }
       else
@@ -566,6 +599,7 @@ bool ModifySL(ulong ticket, double newSL)
 
 //+------------------------------------------------------------------+
 //| Manage open positions — partial TP, trailing, break-even         |
+//| IMPROVED: Better profit protection after partial TP              |
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
@@ -574,6 +608,7 @@ void ManageOpenPositions()
    double atr = g_atrValue;
    if(atr <= 0) return;
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -588,31 +623,61 @@ void ManageOpenPositions()
       double volume    = PositionGetDouble(POSITION_VOLUME);
       double minVol    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
       long   type      = PositionGetInteger(POSITION_TYPE);
-      double point     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
       double currentPrice = (type == POSITION_TYPE_BUY) ?
                             SymbolInfoDouble(_Symbol, SYMBOL_BID) :
                             SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-      //--- Break-Even
+      //--- Calculate current profit distance in ATR
+      double profitDistATR = 0;
+      if(type == POSITION_TYPE_BUY)
+         profitDistATR = (currentPrice - entry) / atr;
+      else
+         profitDistATR = (entry - currentPrice) / atr;
+
+      //--- Check if we already did partial close (by comparing current volume to original)
+      //    We use a simple heuristic: if SL is already at breakeven or better, partial was likely done
+      bool slAtOrAboveEntry = false;
+      if(type == POSITION_TYPE_BUY && sl >= entry)
+         slAtOrAboveEntry = true;
+      else if(type == POSITION_TYPE_SELL && sl <= entry && sl > 0)
+         slAtOrAboveEntry = true;
+
+      //--- IMPROVED Break-Even: Move to BE sooner, with buffer
       if(UseBreakEven)
       {
          double beDist = BreakEven_ATR * atr;
+         double beBuffer = BreakEvenBuffer_Pts * point;
+
          if(type == POSITION_TYPE_BUY)
          {
-            double newSL = NormalizeDouble(entry + point * 5, digits);
-            if(currentPrice >= entry + beDist && sl < entry)
-               ModifySL(ticket, newSL);
+            // Move to breakeven + buffer once profit reaches BreakEven_ATR
+            if(currentPrice >= entry + beDist && sl < entry + beBuffer)
+            {
+               double newSL = NormalizeDouble(entry + beBuffer, digits);
+               if(newSL > sl)
+               {
+                  ModifySL(ticket, newSL);
+                  Print("BREAK-EVEN: BUY SL moved to ", newSL, " (entry+", BreakEvenBuffer_Pts, " pts)");
+               }
+            }
          }
-         else
+         else  // SELL
          {
-            double newSL = NormalizeDouble(entry - point * 5, digits);
-            if(currentPrice <= entry - beDist && (sl > entry || sl == 0))
-               ModifySL(ticket, newSL);
+            // Move to breakeven - buffer once profit reaches BreakEven_ATR
+            if(currentPrice <= entry - beDist && (sl > entry - beBuffer || sl == 0))
+            {
+               double newSL = NormalizeDouble(entry - beBuffer, digits);
+               if(newSL < sl || sl == 0)
+               {
+                  ModifySL(ticket, newSL);
+                  Print("BREAK-EVEN: SELL SL moved to ", newSL, " (entry-", BreakEvenBuffer_Pts, " pts)");
+               }
+            }
          }
       }
 
-      //--- Partial Take-Profit
-      if(UsePartialTP && volume > minVol)
+      //--- IMPROVED Partial Take-Profit: Trigger earlier, move SL to BE immediately
+      if(UsePartialTP && volume > minVol * 1.5)  // Only if position is large enough
       {
          double tpDist = MathAbs(tp - entry);
          double partialLevel = (type == POSITION_TYPE_BUY) ?
@@ -625,42 +690,74 @@ void ManageOpenPositions()
          else if(type == POSITION_TYPE_SELL && currentPrice <= partialLevel)
             partialHit = true;
 
-         if(partialHit)
+         if(partialHit && !slAtOrAboveEntry)  // Only if we haven't already moved SL to BE
          {
             double closeVol = NormalizeDouble(volume * (PartialClosePct / 100.0), 2);
             closeVol = MathMax(closeVol, minVol);
             if(closeVol < volume)
             {
                if(ClosePartial(ticket, closeVol))
+               {
                   Print("PARTIAL TP: Closed ", closeVol, " lots at ", currentPrice);
+                  // IMMEDIATELY move SL to breakeven after partial
+                  double beSL = 0;
+                  if(type == POSITION_TYPE_BUY)
+                     beSL = NormalizeDouble(entry + BreakEvenBuffer_Pts * point, digits);
+                  else
+                     beSL = NormalizeDouble(entry - BreakEvenBuffer_Pts * point, digits);
+                  if(beSL > 0)
+                  {
+                     ModifySL(ticket, beSL);
+                     Print("PARTIAL TP: SL moved to breakeven ", beSL, " after partial close");
+                  }
+               }
             }
          }
       }
 
-      //--- Trailing Stop (after partial TP or after sufficient profit)
+      //--- IMPROVED Trailing Stop: Tighter trail, especially after partial TP
       if(UseTrailing)
       {
-         double trailStart = TrailingStart_ATR * atr;
-         double trailStep  = TrailingStep_ATR * atr;
+         double trailStart, trailStep;
 
-         if(type == POSITION_TYPE_BUY)
+         //--- Use tighter trail after partial TP or SL at BE
+         if(slAtOrAboveEntry && TrailAfterPartial)
          {
-            double profitDist = currentPrice - entry;
-            if(profitDist >= trailStart)
-            {
-               double newSL = NormalizeDouble(currentPrice - trailStep, digits);
-               if(newSL > sl + point)
-                  ModifySL(ticket, newSL);
-            }
+            // Tighter trail: 0.2 ATR step after partial TP
+            trailStart = 0.2 * atr;   // Start trailing immediately after BE
+            trailStep  = 0.1 * atr;   // Very tight trail (was 0.15)
          }
          else
          {
-            double profitDist = entry - currentPrice;
-            if(profitDist >= trailStart)
+            // Normal trail settings
+            trailStart = TrailingStart_ATR * atr;
+            trailStep  = TrailingStep_ATR * atr;
+         }
+
+         if(type == POSITION_TYPE_BUY)
+         {
+            if(profitDistATR >= trailStart / atr)
+            {
+               double newSL = NormalizeDouble(currentPrice - trailStep, digits);
+               if(newSL > sl + point)
+               {
+                  ModifySL(ticket, newSL);
+                  if(DebugMode && newSL > entry)
+                     Print("TRAIL: BUY SL moved to ", newSL, " (profit=", DoubleToString(profitDistATR, 2), "xATR)");
+               }
+            }
+         }
+         else  // SELL
+         {
+            if(profitDistATR >= trailStart / atr)
             {
                double newSL = NormalizeDouble(currentPrice + trailStep, digits);
                if(newSL < sl - point || sl == 0)
+               {
                   ModifySL(ticket, newSL);
+                  if(DebugMode && newSL < entry)
+                     Print("TRAIL: SELL SL moved to ", newSL, " (profit=", DoubleToString(profitDistATR, 2), "xATR)");
+               }
             }
          }
       }
@@ -678,16 +775,17 @@ int OnInit()
                     (g_fillMode == ORDER_FILLING_IOC) ? "IOC" : "RETURN";
 
    Print("================================================================");
-   Print("FXRE Hybrid EA v2.1 initialized");
+   Print("FXRE Hybrid EA v2.10 (Fixed) initialized");
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    Print("  Account: ", AccountInfoInteger(ACCOUNT_LOGIN), " @ ", AccountInfoString(ACCOUNT_SERVER));
    Print("  Balance: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2));
    Print("  Symbol=", _Symbol, " TF=", EnumToString(Period()));
    Print("  Fill mode: ", fillStr);
    Print("  SL: ", SL_BufferATR, "x ATR | TP: ", TP_Multiplier, "x zone | RR>=", Min_RR);
-   Print("  Risk: ", RiskPerTradePct, "% | Max DD: ", MaxDailyLossPct, "%");
-   Print("  Partial TP: ", UsePartialTP ? "ON" : "OFF", " | Trailing: ", UseTrailing ? "ON" : "OFF");
-   Print("  Break-Even: ", UseBreakEven ? "ON" : "OFF");
+   Print("  Risk: ", RiskPerTradePct, "% | Max DD: ", MaxDailyLossPct, "% | MaxLot: ", MaxLotSize);
+   Print("  Partial TP: ", UsePartialTP ? "ON" : "OFF", " @ ", PartialTP_Pct, "% | Close: ", PartialClosePct, "%");
+   Print("  Trailing: ", UseTrailing ? "ON" : "OFF", " Start=", TrailingStart_ATR, "xATR Step=", TrailingStep_ATR, "xATR");
+   Print("  Break-Even: ", UseBreakEven ? "ON" : "OFF", " @ ", BreakEven_ATR, "xATR + ", BreakEvenBuffer_Pts, " pts buffer");
    Print("  Max positions: ", MaxPositions, " | Max daily: ", MaxDailyTrades, " | TP Pause: ", MaxTPHits, " per session");
    Print("  Cluster: ", Swing_ClusterATR, "x ATR | MinStr: ", Swing_MinStrength);
 
