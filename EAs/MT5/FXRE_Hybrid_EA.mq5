@@ -98,6 +98,14 @@ input int      MaxSlippagePts        = 50;
 input int      MaxSpreadPts          = 800;
 input bool     DebugMode             = true;
 
+//--- Market Regime Filter (NEW — avoid ranging markets)
+input bool     UseMarketRegime       = true;   // Enable market regime filter
+input double   RegimeADXThreshold    = 25.0;   // ADX above this = trending
+input double   RegimeADXStrong       = 40.0;   // ADX above this = strong trend
+input double   RegimeATRCompression  = 0.7;    // ATR/MA below this = compression
+input double   RegimeATRExpansion    = 1.3;    // ATR/MA above this = expansion
+input bool     TradeWithBiasOnly     = false;  // Only trade with market direction (+DI/-DI)
+
 //+------------------------------------------------------------------+
 //| Global variables                                                  |
 //+------------------------------------------------------------------+
@@ -111,6 +119,7 @@ datetime g_lastTradeTime = 0;   // Cooldown timer
 
 #include "..\Include\FXRE_SwingSD.mqh"
 #include "..\Include\FXRE_SessionFilter.mqh"
+#include "..\Include\MarketRegime.mqh"
 
 //+------------------------------------------------------------------+
 //| Auto-detect fill mode                                             |
@@ -788,6 +797,7 @@ int OnInit()
    Print("  Break-Even: ", UseBreakEven ? "ON" : "OFF", " @ ", BreakEven_ATR, "xATR + ", BreakEvenBuffer_Pts, " pts buffer");
    Print("  Max positions: ", MaxPositions, " | Max daily: ", MaxDailyTrades, " | TP Pause: ", MaxTPHits, " per session");
    Print("  Cluster: ", Swing_ClusterATR, "x ATR | MinStr: ", Swing_MinStrength);
+   Print("  Market Regime: ", UseMarketRegime ? "ON" : "OFF", " | ADX Threshold: ", RegimeADXThreshold, " | Bias Only: ", TradeWithBiasOnly ? "YES" : "NO");
 
    // Check available M15 bars
    int m15bars = Bars(_Symbol, PERIOD_M15);
@@ -818,6 +828,41 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void CheckHybridEntry()
 {
+   //--- MARKET REGIME FILTER: Skip if market is ranging
+   if(UseMarketRegime)
+   {
+      g_marketRegime.SetThresholds(RegimeADXThreshold, RegimeADXStrong, RegimeATRCompression, RegimeATRExpansion);
+      g_marketRegime.DetectRegime(PERIOD_M15);
+      
+      if(!g_marketRegime.IsTradeable())
+      {
+         static int lastRegimeWarn = 0;
+         if(TimeCurrent() - lastRegimeWarn >= 300)
+         {
+            lastRegimeWarn = TimeCurrent();
+            Print("REGIME BLOCK: ", g_marketRegime.GetRegimeName(),
+                  " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                  " | ATR Ratio=", DoubleToString(g_marketRegime.GetATRRatio(), 2),
+                  " | NOT TRADEABLE");
+         }
+         return;
+      }
+      
+      if(DebugMode)
+      {
+         static int lastRegimeInfo = 0;
+         if(TimeCurrent() - lastRegimeInfo >= 60)
+         {
+            lastRegimeInfo = TimeCurrent();
+            Print("REGIME OK: ", g_marketRegime.GetRegimeName(),
+                  " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                  " | +DI=", DoubleToString(g_marketRegime.GetPlusDI(), 1),
+                  " | -DI=", DoubleToString(g_marketRegime.GetMinusDI(), 1),
+                  " | ATR Ratio=", DoubleToString(g_marketRegime.GetATRRatio(), 2));
+         }
+      }
+   }
+   
    MqlRates ratesM5[];
    ArraySetAsSeries(ratesM5, true);
    if(CopyRates(_Symbol, PERIOD_M5, 0, 10, ratesM5) < 5) return;
@@ -979,6 +1024,25 @@ void CheckHybridEntry()
    bool tradeSell = hasSupply && (rejectionBear || trendBear) &&
                     g_signalBarTime != (int)ratesM5[0].time;
 
+   //--- MARKET BIAS FILTER: Only trade with market direction if enabled
+   if(TradeWithBiasOnly && UseMarketRegime)
+   {
+      int bias = GetMarketBias(PERIOD_M15);
+      if(bias == 1) tradeSell = false;   // Market trending UP — only BUY
+      if(bias == -1) tradeBuy = false;   // Market trending DOWN — only SELL
+      
+      if(bias != 0 && DebugMode)
+      {
+         static int lastBiasWarn = 0;
+         if(TimeCurrent() - lastBiasWarn >= 300)
+         {
+            lastBiasWarn = TimeCurrent();
+            Print("BIAS FILTER: Market=", (bias==1 ? "UP" : "DOWN"),
+                  " | TradeBuy=", tradeBuy, " TradeSell=", tradeSell);
+         }
+      }
+   }
+   
    // Conflict resolution
    if(hasDemand && hasSupply)
    {
@@ -1129,6 +1193,14 @@ void UpdateComment()
 
    if(g_hybridDaily.tradingStopped)
       info += "TRADING STOPPED (daily loss limit)\n";
+   
+   //--- Show regime status
+   if(UseMarketRegime)
+   {
+      info += "Regime: " + g_marketRegime.GetRegimeName();
+      info += " (ADX=" + DoubleToString(g_marketRegime.GetADX(), 1) + ")";
+      info += " | Tradeable: " + (g_marketRegime.IsTradeable() ? "YES" : "NO") + "\n";
+   }
 
    Comment(info);
 }

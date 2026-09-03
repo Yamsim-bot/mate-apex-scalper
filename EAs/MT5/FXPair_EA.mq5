@@ -52,7 +52,7 @@
 
 #include <PriceActionPatterns.mqh>
 #include <SupportResistance.mqh>
-
+#include <MarketRegime.mqh>
 
 
 //+------------------------------------------------------------------+
@@ -271,6 +271,13 @@ input bool     TradeFriday         = true;
 
 input bool     DebugMode           = true;
 
+//--- Market Regime Filter (NEW — avoid ranging markets)
+input string   Inp_Regime         = "=== MARKET REGIME =====";
+input bool     UseMarketRegime    = true;   // Enable market regime filter
+input double   RegimeADXThreshold = 25.0;   // ADX above this = trending
+input double   RegimeADXStrong    = 40.0;   // ADX above this = strong trend
+input double   RegimeATRCompRatio = 0.7;    // ATR/MA below this = compression
+input double   RegimeATRExpRatio  = 1.3;    // ATR/MA above this = expansion
 
 
 //--- FRVP Settings
@@ -877,7 +884,25 @@ void OnTick()
 
       if(sp > MaxSpreadPts) continue;
 
-
+      //--- MARKET REGIME FILTER: Skip if market is ranging
+      if(UseMarketRegime)
+      {
+         g_marketRegime.SetThresholds(RegimeADXThreshold, RegimeADXStrong, RegimeATRCompRatio, RegimeATRExpRatio);
+         g_marketRegime.DetectRegime(TF_Entry);
+         
+         if(!g_marketRegime.IsTradeable())
+         {
+            static int lastRegimeWarn = 0;
+            if(TimeCurrent() - lastRegimeWarn >= 300)
+            {
+               lastRegimeWarn = TimeCurrent();
+               Print("REGIME BLOCK: ", st.name, " ", g_marketRegime.GetRegimeName(),
+                     " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                     " | NOT TRADEABLE");
+            }
+            continue;
+         }
+      }
 
       //--- ATR
 

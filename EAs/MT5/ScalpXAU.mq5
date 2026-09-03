@@ -25,6 +25,7 @@
 #include <SupportResistance.mqh>
 #include <WeeklyVolumeProfile.mqh>
 #include <FXRE_SwingSD.mqh>
+#include <MarketRegime.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -38,6 +39,14 @@ input int      MaxTradesPerSess   = 5;
 input int      MaxPositions       = 1;
 input int      BrokerGMTOffset    = 2;  // Vantage broker GMT+2
 input bool     DebugMode          = false;
+
+//--- Market Regime Filter (NEW — avoid ranging markets)
+input string   Inp_Regime         = "=== MARKET REGIME =====";
+input bool     UseMarketRegime    = true;   // Enable market regime filter
+input double   RegimeADXThreshold = 25.0;   // ADX above this = trending
+input double   RegimeADXStrong    = 40.0;   // ADX above this = strong trend
+input double   RegimeATRCompRatio = 0.7;    // ATR/MA below this = compression
+input double   RegimeATRExpRatio  = 1.3;    // ATR/MA above this = expansion
 
 //--- Timeframes
 input string   Inp_TF             = "======= TIMEFRAMES =======";
@@ -446,6 +455,41 @@ void CheckEntry()
          Print("COOLDOWN: Waiting ", CooldownSeconds - (int)(TimeCurrent() - g_lastTradeTime), "s");
       }
       return;
+   }
+   
+   //--- MARKET REGIME FILTER: Skip if market is ranging
+   if(UseMarketRegime)
+   {
+      g_marketRegime.SetThresholds(RegimeADXThreshold, RegimeADXStrong, RegimeATRCompRatio, RegimeATRExpRatio);
+      g_marketRegime.DetectRegime(EntryTF);
+      
+      if(!g_marketRegime.IsTradeable())
+      {
+         static int lastRegimeWarn = 0;
+         if(TimeCurrent() - lastRegimeWarn >= 300)
+         {
+            lastRegimeWarn = TimeCurrent();
+            Print("REGIME BLOCK: ", g_marketRegime.GetRegimeName(),
+                  " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                  " | ATR Ratio=", DoubleToString(g_marketRegime.GetATRRatio(), 2),
+                  " | NOT TRADEABLE");
+         }
+         return;
+      }
+      
+      if(DebugMode)
+      {
+         static int lastRegimeInfo = 0;
+         if(TimeCurrent() - lastRegimeInfo >= 60)
+         {
+            lastRegimeInfo = TimeCurrent();
+            Print("REGIME OK: ", g_marketRegime.GetRegimeName(),
+                  " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                  " | +DI=", DoubleToString(g_marketRegime.GetPlusDI(), 1),
+                  " | -DI=", DoubleToString(g_marketRegime.GetMinusDI(), 1),
+                  " | ATR Ratio=", DoubleToString(g_marketRegime.GetATRRatio(), 2));
+         }
+      }
    }
 
    //--- Need FRVP valid for entries

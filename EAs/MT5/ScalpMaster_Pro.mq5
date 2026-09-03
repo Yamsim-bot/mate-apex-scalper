@@ -9,6 +9,7 @@
 #property strict
 
 #include <DeltaBubble.mqh>
+#include <MarketRegime.mqh>
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                   |
@@ -64,6 +65,13 @@ input int      LondonStart       = 7;          // London open (GMT)
 input int      LondonEnd         = 10;         // London close (GMT)
 input int      NYStart           = 13;         // NY open (GMT)
 input int      NYEnd             = 16;         // NY close (GMT)
+
+input string   Inp_Regime        = "=== MARKET REGIME =====";
+input bool     UseMarketRegime   = true;       // Enable market regime filter
+input double   RegimeADXThreshold = 25.0;      // ADX above this = trending
+input double   RegimeADXStrong    = 40.0;      // ADX above this = strong trend
+input double   RegimeATRCompRatio = 0.7;       // ATR/MA below this = compression
+input double   RegimeATRExpRatio  = 1.3;       // ATR/MA above this = expansion
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                            |
@@ -309,6 +317,26 @@ void ScanSDZones()
 void CheckEntry()
 {
    if(gATR <= 0) return;
+   
+   //--- MARKET REGIME FILTER: Skip if market is ranging
+   if(UseMarketRegime)
+   {
+      g_marketRegime.SetThresholds(RegimeADXThreshold, RegimeADXStrong, RegimeATRCompRatio, RegimeATRExpRatio);
+      g_marketRegime.DetectRegime(EntryTF);
+      
+      if(!g_marketRegime.IsTradeable())
+      {
+         static int lastRegimeWarn = 0;
+         if(TimeCurrent() - lastRegimeWarn >= 300)
+         {
+            lastRegimeWarn = TimeCurrent();
+            Print("REGIME BLOCK: ", g_marketRegime.GetRegimeName(),
+                  " | ADX=", DoubleToString(g_marketRegime.GetADX(), 1),
+                  " | NOT TRADEABLE");
+         }
+         return;
+      }
+   }
    
    // Compute VP
    static int lastVP = 0;
