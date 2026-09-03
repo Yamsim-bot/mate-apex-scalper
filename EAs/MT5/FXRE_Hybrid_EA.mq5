@@ -21,12 +21,12 @@ input bool     ScalpMode           = true;       // Enable scalp mode (aggressiv
 input double   Scalp_BreakoutATR   = 0.25;       // Min breakout range (xATR, was 0.20 — too tight)
 input int      Scalp_BreakoutBars  = 3;          // Lookback bars for breakout (was 2 — too few)
 
-//--- Swing S&D Parameters
-input int      Swing_LookbackCandles = 1000;  // Scan depth for swings
-input int      Swing_LookbackBars    = 3;     // Bars each side for swing detection
-input double   Swing_ClusterATR      = 0.6;   // Cluster threshold (x ATR, was 1.5)
-input int      Swing_MaxAge          = 240;   // Max zone age in M15 candles (was 80)
-input double   Swing_MinStrength     = 0.3;   // Minimum zone strength (1-5, was 1.5)
+//--- Swing S&D Parameters (REDUCED for memory efficiency)
+input int      Swing_LookbackCandles = 500;   // Scan depth for swings (was 1000 — too much memory)
+input int      Swing_LookbackBars    = 2;     // Bars each side for swing detection (was 3)
+input double   Swing_ClusterATR      = 0.8;   // Cluster threshold (x ATR, was 0.6 — wider = fewer zones)
+input int      Swing_MaxAge          = 120;   // Max zone age in M15 candles (was 240 — old zones waste memory)
+input double   Swing_MinStrength     = 1.0;   // Minimum zone strength (was 0.3 — too many weak zones)
 
 //--- Entry Confirmation
 input bool     RequireZoneReject     = false;
@@ -35,7 +35,7 @@ input double   ZoneProximityATR      = 2.0;   // Max distance from zone (xATR, w
 
 //--- Trend Filter (optional — only trade with M15 trend)
 input bool     UseTrendFilter        = false;
-input int      TrendFilterMAPeriod   = 200;   // EMA for trend direction
+input int      TrendFilterMAPeriod   = 50;    // EMA for trend direction (was 200 — uses less memory)
 
 //--- Risk Management (IMPROVED — wider SL for gold volatility)
 input double   RiskPerTradePct       = 0.3;   // % risk per trade (was 0.5 — too aggressive)
@@ -117,9 +117,38 @@ ENUM_ORDER_TYPE_FILLING g_fillMode = ORDER_FILLING_IOC;
 int    g_heartbeatCount = 0;
 datetime g_lastTradeTime = 0;   // Cooldown timer
 
+//--- Memory optimization: limit history bars loaded
+#define MAX_HISTORY_BARS 500   // Max bars to load (reduces memory)
+#define MAX_RATES_M5 20       // Max M5 bars to copy
+
 #include "..\Include\FXRE_SwingSD.mqh"
 #include "..\Include\FXRE_SessionFilter.mqh"
 #include "..\Include\MarketRegime.mqh"
+
+//+------------------------------------------------------------------+
+//| Check available memory (prevent VirtualAlloc errors)             |
+//+------------------------------------------------------------------+
+bool IsMemorySafe()
+{
+   // Check free physical memory
+   MEMORYSTATUSEX memInfo;
+   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+   if(GlobalMemoryStatusEx(memInfo))
+   {
+      DWORD freePhysMB = memInfo.ullAvailPhys / (1024 * 1024);
+      if(freePhysMB < 100) // Less than 100MB free
+      {
+         static int lastMemWarn = 0;
+         if(TimeCurrent() - lastMemWarn >= 60)
+         {
+            lastMemWarn = TimeCurrent();
+            Print("MEMORY WARNING: Only ", freePhysMB, "MB free! Trading paused.");
+         }
+         return false;
+      }
+   }
+   return true;
+}
 
 //+------------------------------------------------------------------+
 //| Auto-detect fill mode                                             |
@@ -865,7 +894,7 @@ void CheckHybridEntry()
    
    MqlRates ratesM5[];
    ArraySetAsSeries(ratesM5, true);
-   if(CopyRates(_Symbol, PERIOD_M5, 0, 10, ratesM5) < 5) return;
+   if(CopyRates(_Symbol, PERIOD_M5, 0, MAX_RATES_M5, ratesM5) < 5) return;
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1210,6 +1239,13 @@ void UpdateComment()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   //--- Memory safety check (prevent VirtualAlloc errors)
+   if(!IsMemorySafe())
+   {
+      UpdateComment();
+      return;
+   }
+   
    ResetHybridDaily();
 
    //--- Detect TPs hit today

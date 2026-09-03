@@ -52,11 +52,11 @@ input double   RegimeATRExpRatio  = 1.3;    // ATR/MA above this = expansion
 input string   Inp_TF             = "======= TIMEFRAMES =======";
 input ENUM_TIMEFRAMES EntryTF     = PERIOD_M15;
 input ENUM_TIMEFRAMES ProfileTF   = PERIOD_M15;
-input int      SwingLookback      = 100;
+input int      SwingLookback      = 50;             // Swing lookback (was 100 — saves memory)
 
 //--- FRVP Settings
 input string   Inp_FRVP           = "===== FRVP SETTINGS ======";
-input int      FRVP_Anchors       = 48;            // FRVP lookback bars (48xM15 = 12h)
+input int      FRVP_Anchors       = 24;             // FRVP lookback bars (was 48 — 6h enough, saves memory)
 input double   FRVP_BucketPips    = 0.50;           // FRVP bucket size (price units)
 input double   FRVP_ValueAreaPct  = 70.0;           // Value area % (default 70)
 input double   FRVP_HVNThreshold  = 0.70;           // HVN = vol >= 70% of POC
@@ -75,8 +75,8 @@ input bool     PA_RequireTrend    = true;            // PA must agree with MA tr
 //--- Trend Filter (MA50/200)
 input string   Inp_Trend          = "===== TREND FILTER ======";
 input bool     EnableTrendFilter  = true;
-input int      Trend_MA_Fast      = 50;
-input int      Trend_MA_Slow      = 200;
+input int      Trend_MA_Fast      = 20;    // Fast MA (was 50 — saves memory)
+input int      Trend_MA_Slow      = 50;    // Slow MA (was 200 — saves memory)
 
 //--- Risk Management
 input string   Inp_RM             = "===== RISK MGMT ======";
@@ -312,6 +312,25 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   //--- Memory safety check (prevent VirtualAlloc errors)
+   MEMORYSTATUSEX memInfo;
+   memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+   if(GlobalMemoryStatusEx(memInfo))
+   {
+      DWORD freePhysMB = memInfo.ullAvailPhys / (1024 * 1024);
+      if(freePhysMB < 100) // Less than 100MB free
+      {
+         static int lastMemWarn = 0;
+         if(TimeCurrent() - lastMemWarn >= 60)
+         {
+            lastMemWarn = TimeCurrent();
+            Print("MEMORY WARNING: Only ", freePhysMB, "MB free! Trading paused.");
+         }
+         UpdateComment();
+         return;
+      }
+   }
+   
    ResetDaily();
 
    if(g_stats.tradingStopped)
