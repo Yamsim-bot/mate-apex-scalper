@@ -48,11 +48,11 @@
 
 
 
-#include <FixedRangeVolumeProfile.mqh>
+#include "..\Include\FixedRangeVolumeProfile.mqh"
 
-#include <PriceActionPatterns.mqh>
-#include <SupportResistance.mqh>
-#include <MarketRegime.mqh>
+#include "..\Include\PriceActionPatterns.mqh"
+#include "..\Include\SupportResistance.mqh"
+#include "..\Include\MarketRegime.mqh"
 
 
 //+------------------------------------------------------------------+

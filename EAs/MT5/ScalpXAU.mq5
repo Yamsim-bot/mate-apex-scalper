@@ -17,15 +17,15 @@
 #property description "Session-gated entries at Volume Profile zones"
 #property strict
 
-#include <Trade/Trade.mqh>
-#include <Trade/PositionInfo.mqh>
-#include <Trade/AccountInfo.mqh>
-#include <FixedRangeVolumeProfile.mqh>
-#include <PriceActionPatterns.mqh>
-#include <SupportResistance.mqh>
-#include <WeeklyVolumeProfile.mqh>
-#include <FXRE_SwingSD.mqh>
-#include <MarketRegime.mqh>
+#include "..\Include\Trade\Trade.mqh"
+#include "..\Include\Trade\PositionInfo.mqh"
+#include "..\Include\Trade\AccountInfo.mqh"
+#include "..\Include\FixedRangeVolumeProfile.mqh"
+#include "..\Include\PriceActionPatterns.mqh"
+#include "..\Include\SupportResistance.mqh"
+#include "..\Include\WeeklyVolumeProfile.mqh"
+#include "..\Include\FXRE_SwingSD.mqh"
+#include "..\Include\MarketRegime.mqh"
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |

@@ -8,8 +8,8 @@
 #property version   "3.00"
 #property strict
 
-#include <DeltaBubble.mqh>
-#include <MarketRegime.mqh>
+#include "..\Include\DeltaBubble.mqh"
+#include "..\Include\MarketRegime.mqh"
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                   |

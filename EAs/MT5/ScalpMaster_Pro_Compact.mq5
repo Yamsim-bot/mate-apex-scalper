@@ -15,9 +15,9 @@
 #property description "XAUUSD VP Scalper - 2GB VPS Optimized"
 #property strict
 
-#include <Trade/Trade.mqh>
-#include <Trade/PositionInfo.mqh>
-#include <Trade/AccountInfo.mqh>
+#include "..\Include\Trade\Trade.mqh"
+#include "..\Include\Trade\PositionInfo.mqh"
+#include "..\Include\Trade\AccountInfo.mqh"
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
