@@ -121,9 +121,707 @@ datetime g_lastTradeTime = 0;   // Cooldown timer
 #define MAX_HISTORY_BARS 500   // Max bars to load (reduces memory)
 #define MAX_RATES_M5 20       // Max M5 bars to copy
 
-#include "..\Include\FXRE_SwingSD.mqh"
-#include "..\Include\FXRE_SessionFilter.mqh"
-#include "..\Include\MarketRegime.mqh"
+//--- INLINE: FXRE_SwingSD.mqh ---
+//+------------------------------------------------------------------+
+//|                                            FXRE_SwingSD.mqh       |
+//|               FXRE Hybrid — Swing-point Supply & Demand Zones     |
+//+------------------------------------------------------------------+
+//| Detects swing highs (supply) and swing lows (demand) on M15,
+//| clusters nearby swings into zones, assigns strength based on
+//| follow-through distance.
+//+------------------------------------------------------------------+
+
+//--- Swing-point S&D structure
+struct SwingSDZone
+{
+   datetime   formationTime;
+   double     priceHigh;
+   double     priceLow;
+   double     priceMid;
+   bool       isDemand;      // true=demand(buy), false=supply(sell)
+   double     strength;      // 1.0 to 5.0 (higher = stronger)
+   int        ageCandles;    // candles since last swing in cluster
+   int        swingCount;    // number of swings clustered
+   double     zoneWidth;     // priceHigh - priceLow
+};
+
+//--- Module state
+SwingSDZone g_swingBullish[];   // Demand zones
+SwingSDZone g_swingBearish[];   // Supply zones
+int   g_swingBullishTotal = 0;
+int   g_swingBearishTotal = 0;
+
+//+------------------------------------------------------------------+
+//| Detect swing points & build zones                                |
+//| Returns total zone count                                         |
+//+------------------------------------------------------------------+
+int DetectSwingZones(ENUM_TIMEFRAMES tf, int lookbackBars, int swingLookback,
+                     double clusterPoints, int maxAge, double minStrength)
+{
+   ArrayFree(g_swingBullish);
+   ArrayFree(g_swingBearish);
+   g_swingBullishTotal = 0;
+   g_swingBearishTotal = 0;
+
+   if(lookbackBars < 20) return 0;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, tf, 0, lookbackBars + swingLookback * 2 + 5, rates);
+   if(copied < lookbackBars) return 0;
+
+   int look = swingLookback;
+   double clusterThresh = clusterPoints;
+
+   //--- Collect raw swing points
+   struct RawSwing { double price; int idx; int strength; bool isDemand; };
+   RawSwing rawSwings[];
+   int rawCount = 0;
+   ArrayResize(rawSwings, 5000);
+
+   for(int i = look; i < lookbackBars - look; i++)
+   {
+      //--- Swing high (supply potential)
+      bool isHigh = true;
+      for(int k = 1; k <= look; k++)
+      {
+         if(rates[i].high < rates[i - k].high ||
+            rates[i].high < rates[i + k].high ||
+            rates[i].high <= rates[i - 1].high)
+         { isHigh = false; break; }
+      }
+      if(isHigh)
+      {
+         int str = 1;
+         for(int k = 1; k <= look; k++)
+            if(rates[i].close > rates[i + k].close) str++;
+         rawSwings[rawCount].price   = rates[i].high;
+         rawSwings[rawCount].idx     = i;
+         rawSwings[rawCount].strength = MathMin(str, 5);
+         rawSwings[rawCount].isDemand = false;
+         rawCount++;
+      }
+
+      //--- Swing low (demand potential)
+      bool isLow = true;
+      for(int k = 1; k <= look; k++)
+      {
+         if(rates[i].low > rates[i - k].low ||
+            rates[i].low > rates[i + k].low ||
+            rates[i].low >= rates[i - 1].low)
+         { isLow = false; break; }
+      }
+      if(isLow)
+      {
+         int str = 1;
+         for(int k = 1; k <= look; k++)
+            if(rates[i].close < rates[i + k].close) str++;
+         rawSwings[rawCount].price   = rates[i].low;
+         rawSwings[rawCount].idx     = i;
+         rawSwings[rawCount].strength = MathMin(str, 5);
+         rawSwings[rawCount].isDemand = true;
+         rawCount++;
+      }
+   }
+
+   if(rawCount == 0) return 0;
+
+   //--- Sort raw swings by price
+   bool swapped = true;
+   while(swapped)
+   {
+      swapped = false;
+      for(int i = 0; i < rawCount - 1; i++)
+      {
+         if(rawSwings[i].price > rawSwings[i + 1].price)
+         {
+            RawSwing t = rawSwings[i]; rawSwings[i] = rawSwings[i + 1]; rawSwings[i + 1] = t;
+            swapped = true;
+         }
+      }
+   }
+
+   //--- Cluster nearby swings into zones (separate demand/supply)
+   // Process demand swings
+   SwingSDZone tempDZ[], tempSZ[];
+   int dzCount = 0, szCount = 0;
+   ArrayResize(tempDZ, rawCount);
+   ArrayResize(tempSZ, rawCount);
+
+   // Cluster demand
+   int start = 0;
+   for(int i = 0; i < rawCount; i++)
+   {
+      if(!rawSwings[i].isDemand) continue;
+      if(dzCount == 0 || rawSwings[i].price - tempDZ[dzCount - 1].priceHigh > clusterThresh)
+      {
+         // New cluster
+         tempDZ[dzCount].formationTime = rates[rawSwings[i].idx].time;
+         tempDZ[dzCount].priceHigh = rawSwings[i].price;
+         tempDZ[dzCount].priceLow  = rawSwings[i].price;
+         tempDZ[dzCount].priceMid  = rawSwings[i].price;
+         tempDZ[dzCount].isDemand  = true;
+         tempDZ[dzCount].strength  = (double)rawSwings[i].strength;
+         tempDZ[dzCount].ageCandles = rawSwings[i].idx;
+         tempDZ[dzCount].swingCount = 1;
+         tempDZ[dzCount].zoneWidth  = 0;
+         dzCount++;
+      }
+      else
+      {
+         // Add to existing cluster
+         int ci = dzCount - 1;
+         if(rawSwings[i].price > tempDZ[ci].priceHigh) tempDZ[ci].priceHigh = rawSwings[i].price;
+         if(rawSwings[i].price < tempDZ[ci].priceLow)  tempDZ[ci].priceLow  = rawSwings[i].price;
+         tempDZ[ci].priceMid = (tempDZ[ci].priceHigh + tempDZ[ci].priceLow) / 2.0;
+         tempDZ[ci].strength = (tempDZ[ci].strength * tempDZ[ci].swingCount + rawSwings[i].strength)
+                              / (tempDZ[ci].swingCount + 1);
+         tempDZ[ci].swingCount++;
+         if(rawSwings[i].idx > tempDZ[ci].ageCandles)
+            tempDZ[ci].ageCandles = rawSwings[i].idx;
+         tempDZ[ci].zoneWidth = tempDZ[ci].priceHigh - tempDZ[ci].priceLow;
+      }
+   }
+
+   // Cluster supply
+   for(int i = 0; i < rawCount; i++)
+   {
+      if(rawSwings[i].isDemand) continue;
+      if(szCount == 0 || rawSwings[i].price - tempSZ[szCount - 1].priceHigh > clusterThresh)
+      {
+         tempSZ[szCount].formationTime = rates[rawSwings[i].idx].time;
+         tempSZ[szCount].priceHigh = rawSwings[i].price;
+         tempSZ[szCount].priceLow  = rawSwings[i].price;
+         tempSZ[szCount].priceMid  = rawSwings[i].price;
+         tempSZ[szCount].isDemand  = false;
+         tempSZ[szCount].strength  = (double)rawSwings[i].strength;
+         tempSZ[szCount].ageCandles = rawSwings[i].idx;
+         tempSZ[szCount].swingCount = 1;
+         tempSZ[szCount].zoneWidth  = 0;
+         szCount++;
+      }
+      else
+      {
+         int ci = szCount - 1;
+         if(rawSwings[i].price > tempSZ[ci].priceHigh) tempSZ[ci].priceHigh = rawSwings[i].price;
+         if(rawSwings[i].price < tempSZ[ci].priceLow)  tempSZ[ci].priceLow  = rawSwings[i].price;
+         tempSZ[ci].priceMid = (tempSZ[ci].priceHigh + tempSZ[ci].priceLow) / 2.0;
+         tempSZ[ci].strength = (tempSZ[ci].strength * tempSZ[ci].swingCount + rawSwings[i].strength)
+                              / (tempSZ[ci].swingCount + 1);
+         tempSZ[ci].swingCount++;
+         if(rawSwings[i].idx > tempSZ[ci].ageCandles)
+            tempSZ[ci].ageCandles = rawSwings[i].idx;
+         tempSZ[ci].zoneWidth = tempSZ[ci].priceHigh - tempSZ[ci].priceLow;
+      }
+   }
+
+   //--- Filter by age, strength — copy to global arrays
+   for(int i = 0; i < dzCount; i++)
+   {
+      if(tempDZ[i].ageCandles <= maxAge &&
+         tempDZ[i].strength >= minStrength)
+      {
+         ArrayResize(g_swingBullish, g_swingBullishTotal + 1, 20);
+         g_swingBullish[g_swingBullishTotal] = tempDZ[i];
+         g_swingBullishTotal++;
+      }
+   }
+   for(int i = 0; i < szCount; i++)
+   {
+      if(tempSZ[i].ageCandles <= maxAge &&
+         tempSZ[i].strength >= minStrength)
+      {
+         ArrayResize(g_swingBearish, g_swingBearishTotal + 1, 20);
+         g_swingBearish[g_swingBearishTotal] = tempSZ[i];
+         g_swingBearishTotal++;
+      }
+   }
+
+   // Sort by strength descending
+   SortSwingZones(g_swingBullish, g_swingBullishTotal, true);
+   SortSwingZones(g_swingBearish, g_swingBearishTotal, true);
+
+   return g_swingBullishTotal + g_swingBearishTotal;
+}
+
+//+------------------------------------------------------------------+
+//| Find nearest demand zone below/at price                          |
+//+------------------------------------------------------------------+
+bool GetNearestDemandZone(double price, double proximityATR, double atrValue,
+                          SwingSDZone &zone)
+{
+   double nearestDist = DBL_MAX;
+   int nearestIdx = -1;
+   double thresh = atrValue * proximityATR;
+
+   for(int i = 0; i < g_swingBullishTotal; i++)
+   {
+      // Price should be AT or ABOVE demand zone
+      if(price < g_swingBullish[i].priceLow - thresh) continue;
+
+      double dist = price - g_swingBullish[i].priceMid;
+      if(dist >= -thresh && dist < nearestDist)
+      {
+         nearestDist = dist;
+         nearestIdx = i;
+      }
+   }
+
+   if(nearestIdx >= 0)
+   {
+      zone = g_swingBullish[nearestIdx];
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Find nearest supply zone above/at price                          |
+//+------------------------------------------------------------------+
+bool GetNearestSupplyZone(double price, double proximityATR, double atrValue,
+                          SwingSDZone &zone)
+{
+   double nearestDist = DBL_MAX;
+   int nearestIdx = -1;
+   double thresh = atrValue * proximityATR;
+
+   for(int i = 0; i < g_swingBearishTotal; i++)
+   {
+      // Price should be AT or BELOW supply zone
+      if(price > g_swingBearish[i].priceHigh + thresh) continue;
+
+      double dist = g_swingBearish[i].priceMid - price;
+      if(dist >= -thresh && dist < nearestDist)
+      {
+         nearestDist = dist;
+         nearestIdx = i;
+      }
+   }
+
+   if(nearestIdx >= 0)
+   {
+      zone = g_swingBearish[nearestIdx];
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Sort zones by strength descending (true) or ascending            |
+//+------------------------------------------------------------------+
+void SortSwingZones(SwingSDZone &zones[], int count, bool descending)
+{
+   for(int i = 0; i < count - 1; i++)
+      for(int j = i + 1; j < count; j++)
+         if(descending ? (zones[j].strength > zones[i].strength)
+                       : (zones[j].strength < zones[i].strength))
+         { SwingSDZone t = zones[i]; zones[i] = zones[j]; zones[j] = t; }
+}
+
+//+------------------------------------------------------------------+
+//| Print active zones                                               |
+//+------------------------------------------------------------------+
+void PrintSwingZones()
+{
+   Print("=== Demand Zones (BUY): ", g_swingBullishTotal, " ===");
+   for(int i = 0; i < MathMin(g_swingBullishTotal, 5); i++)
+      PrintFormat("DZ[%d] Time=%s Zone=[%.2f-%.2f] Str=%.1f Age=%d Swings=%d Width=%.2f",
+         i, TimeToString(g_swingBullish[i].formationTime),
+         g_swingBullish[i].priceLow, g_swingBullish[i].priceHigh,
+         g_swingBullish[i].strength, g_swingBullish[i].ageCandles,
+         g_swingBullish[i].swingCount, g_swingBullish[i].zoneWidth);
+
+   Print("=== Supply Zones (SELL): ", g_swingBearishTotal, " ===");
+   for(int i = 0; i < MathMin(g_swingBearishTotal, 5); i++)
+      PrintFormat("SZ[%d] Time=%s Zone=[%.2f-%.2f] Str=%.1f Age=%d Swings=%d Width=%.2f",
+         i, TimeToString(g_swingBearish[i].formationTime),
+         g_swingBearish[i].priceLow, g_swingBearish[i].priceHigh,
+         g_swingBearish[i].strength, g_swingBearish[i].ageCandles,
+         g_swingBearish[i].swingCount, g_swingBearish[i].zoneWidth);
+}
+//+------------------------------------------------------------------+
+
+//--- END INLINE: FXRE_SwingSD.mqh ---
+//--- INLINE: FXRE_SessionFilter.mqh ---
+//+------------------------------------------------------------------+
+//|                                            FXRE_SessionFilter.mqh|
+//|               FXRE Ultimate AI Replication — Session & Time Filter|
+//+------------------------------------------------------------------+
+//| FXRE Session Filter — no #property (included from main EA)
+
+
+//+------------------------------------------------------------------+
+//| Get current hour in PH Time (UTC+8)                              |
+//+------------------------------------------------------------------+
+int PHTimeHour()
+{
+   MqlDateTime dt;
+   TimeTradeServer(dt);
+   int phHour = dt.hour + 8;
+   if(phHour >= 24) phHour -= 24;
+   if(phHour < 0)   phHour += 24;
+   return phHour;
+}
+
+int PHTimeMin()
+{
+   MqlDateTime dt;
+   TimeTradeServer(dt);
+   return dt.min;
+}
+
+int PHTimeDayOfWeek()
+{
+   MqlDateTime dt;
+   TimeTradeServer(dt);
+   int phHour = dt.hour + 8;
+   int phDow  = dt.day_of_week;
+   if(phHour >= 24) { phDow++; if(phDow > 6) phDow = 0; }
+   return phDow;
+}
+
+//+------------------------------------------------------------------+
+//| Check if current PH time is within trading session               |
+//+------------------------------------------------------------------+
+bool IsInSession()
+{
+   if(!UseSessionFilter) return true;
+
+   int phHour = PHTimeHour();
+   int phMin  = PHTimeMin();
+   int sessionStartMinutes = SessionStartHour * 60 + SessionStartMin;
+   int sessionEndMinutes   = SessionEndHour   * 60 + SessionEndMin;
+   int currentMinutes      = phHour * 60 + phMin;
+
+   if(sessionStartMinutes < sessionEndMinutes)
+      return (currentMinutes >= sessionStartMinutes && currentMinutes < sessionEndMinutes);
+   else
+      return (currentMinutes >= sessionStartMinutes || currentMinutes < sessionEndMinutes);
+}
+
+//+------------------------------------------------------------------+
+//| Check if current day is valid for trading                        |
+//+------------------------------------------------------------------+
+bool IsTradingDay()
+{
+   if(!UseSessionFilter) return true;
+   int phDow = PHTimeDayOfWeek();
+   switch(phDow)
+   {
+      case 1: return TradeMonday;
+      case 2: return TradeTuesday;
+      case 3: return TradeWednesday;
+      case 4: return TradeThursday;
+      case 5: return TradeFriday;
+      default: return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Combined check                                                   |
+//+------------------------------------------------------------------+
+bool ShouldTradeNow()
+{
+   if(!UseSessionFilter) return true;
+   return IsTradingDay() && IsInSession();
+}
+
+//+------------------------------------------------------------------+
+//| Status string                                                    |
+//+------------------------------------------------------------------+
+string GetSessionStatus()
+{
+   if(!UseSessionFilter) return "No filter";
+
+   int phHour = PHTimeHour();
+   int phMin  = PHTimeMin();
+   int phDow  = PHTimeDayOfWeek();
+   string dayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+   string status = dayNames[phDow] + " " + IntegerToString(phHour) + ":" + StringFormat("%02d", phMin) + " PH | ";
+
+   if(IsTradingDay() && IsInSession())
+      status += "SESSION ACTIVE";
+   else if(!IsTradingDay())
+      status += "NOT A TRADING DAY";
+   else
+      status += "OUTSIDE SESSION HOURS";
+
+   return status;
+}
+//+------------------------------------------------------------------+
+
+//--- END INLINE: FXRE_SessionFilter.mqh ---
+//--- INLINE: MarketRegime.mqh ---
+//+------------------------------------------------------------------+
+//|                                            MarketRegime.mqh       |
+//|               Market Regime Filter — Avoid Ranging Markets         |
+//|               Uses ADX + ATR Compression + Session Volume          |
+//+------------------------------------------------------------------+
+#property copyright "XAU MATE Trading"
+#property version   "1.00"
+#property description "Market regime detection: Trending vs Ranging"
+
+//--- Market Regime Enum
+enum ENUM_MARKET_REGIME
+{
+   REGIME_TRENDING_UP,     // Trending Up (ADX > threshold, +DI > -DI)
+   REGIME_TRENDING_DOWN,   // Trending Down (ADX > threshold, -DI > +DI)
+   REGIME_RANGING,         // Ranging (ADX < threshold)
+   REGIME_VOLATILE,        // High Volatility (ATR spike)
+   REGIME_QUIET            // Low Volatility (ATR compression)
+};
+
+//+------------------------------------------------------------------+
+//| Market Regime Detector Class                                      |
+//+------------------------------------------------------------------+
+class CMarketRegime
+{
+private:
+   int      m_adxPeriod;
+   int      m_atrPeriod;
+   double   m_adxTrendThreshold;    // Above this = trending (default 25)
+   double   m_adxStrongThreshold;   // Above this = strong trend (default 40)
+   double   m_atrCompressionRatio;  // ATR/MA_ATR below this = compression
+   double   m_atrExpansionRatio;    // ATR/MA_ATR above this = expansion
+   int      m_maPeriod;             // MA period for ATR smoothing
+   
+   ENUM_MARKET_REGIME m_currentRegime;
+   double   m_currentADX;
+   double   m_currentPlusDI;
+   double   m_currentMinusDI;
+   double   m_currentATR;
+   double   m_atrMA;
+   double   m_atrRatio;
+   bool     m_isRanging;
+   bool     m_isTrending;
+   bool     m_isVolatile;
+   bool     m_isQuiet;
+   
+public:
+   //--- Constructor
+   CMarketRegime(int adxPeriod = 14, int atrPeriod = 14, int maPeriod = 50)
+   {
+      m_adxPeriod = adxPeriod;
+      m_atrPeriod = atrPeriod;
+      m_maPeriod = maPeriod;
+      m_adxTrendThreshold = 25.0;
+      m_adxStrongThreshold = 40.0;
+      m_atrCompressionRatio = 0.7;
+      m_atrExpansionRatio = 1.3;
+      m_currentRegime = REGIME_RANGING;
+      m_currentADX = 0;
+      m_currentPlusDI = 0;
+      m_currentMinusDI = 0;
+      m_currentATR = 0;
+      m_atrMA = 0;
+      m_atrRatio = 1.0;
+      m_isRanging = true;
+      m_isTrending = false;
+      m_isVolatile = false;
+      m_isQuiet = false;
+   }
+   
+   //--- Set thresholds
+   void SetThresholds(double adxTrend = 25.0, double adxStrong = 40.0, 
+                      double atrComp = 0.7, double atrExp = 1.3)
+   {
+      m_adxTrendThreshold = adxTrend;
+      m_adxStrongThreshold = adxStrong;
+      m_atrCompressionRatio = atrComp;
+      m_atrExpansionRatio = atrExp;
+   }
+   
+   //--- Calculate ADX and DI values
+   bool CalcADX(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      double plusDI[], minusDI[], adx[];
+      ArraySetAsSeries(plusDI, true);
+      ArraySetAsSeries(minusDI, true);
+      ArraySetAsSeries(adx, true);
+      
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 0, 0, m_adxPeriod + 5, adx) < m_adxPeriod)
+         return false;
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 1, 0, m_adxPeriod + 5, plusDI) < m_adxPeriod)
+         return false;
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 2, 0, m_adxPeriod + 5, minusDI) < m_adxPeriod)
+         return false;
+      
+      m_currentADX = adx[0];
+      m_currentPlusDI = plusDI[0];
+      m_currentMinusDI = minusDI[0];
+      
+      return true;
+   }
+   
+   //--- Calculate ATR and its moving average
+   bool CalcATRRegime(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      
+      int atrHandle = iATR(_Symbol, tf, m_atrPeriod);
+      if(atrHandle == INVALID_HANDLE) return false;
+      
+      if(CopyBuffer(atrHandle, 0, 0, m_maPeriod + 5, atr) < m_maPeriod)
+         return false;
+      
+      m_currentATR = atr[0];
+      
+      // Calculate MA of ATR
+      double sum = 0;
+      for(int i = 0; i < m_maPeriod; i++)
+         sum += atr[i];
+      m_atrMA = sum / m_maPeriod;
+      
+      // ATR ratio (current / MA)
+      m_atrRatio = (m_atrMA > 0) ? m_currentATR / m_atrMA : 1.0;
+      
+      return true;
+   }
+   
+   //--- Detect market regime
+   ENUM_MARKET_REGIME DetectRegime(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      if(!CalcADX(tf)) return REGIME_RANGING;
+      if(!CalcATRRegime(tf)) return REGIME_RANGING;
+      
+      // Determine regime
+      bool adxTrending = (m_currentADX >= m_adxTrendThreshold);
+      bool adxStrong = (m_currentADX >= m_adxStrongThreshold);
+      bool plusDIDominant = (m_currentPlusDI > m_currentMinusDI);
+      bool minusDIDominant = (m_currentMinusDI > m_currentPlusDI);
+      bool atrCompressed = (m_atrRatio < m_atrCompressionRatio);
+      bool atrExpanded = (m_atrRatio > m_atrExpansionRatio);
+      
+      // Set boolean flags
+      m_isRanging = !adxTrending || atrCompressed;
+      m_isTrending = adxTrending && !atrCompressed;
+      m_isVolatile = atrExpanded && adxTrending;
+      m_isQuiet = atrCompressed && !adxTrending;
+      
+      // Determine regime
+      if(adxStrong && plusDIDominant)
+         m_currentRegime = REGIME_TRENDING_UP;
+      else if(adxStrong && minusDIDominant)
+         m_currentRegime = REGIME_TRENDING_DOWN;
+      else if(adxTrending && plusDIDominant)
+         m_currentRegime = REGIME_TRENDING_UP;
+      else if(adxTrending && minusDIDominant)
+         m_currentRegIME = REGIME_TRENDING_DOWN;
+      else if(atrExpanded)
+         m_currentRegime = REGIME_VOLATILE;
+      else if(atrCompressed)
+         m_currentRegime = REGIME_QUIET;
+      else
+         m_currentRegime = REGIME_RANGING;
+      
+      return m_currentRegime;
+   }
+   
+   //--- Check if market is tradeable (not ranging)
+   bool IsTradeable()
+   {
+      // Don't trade if:
+      // 1. Market is ranging (ADX < 25)
+      // 2. ATR is compressed (low volatility)
+      // 3. ADX is falling (weakening trend)
+      
+      if(m_isRanging)
+         return false;
+      
+      if(m_isQuiet)
+         return false;
+      
+      // Check if ADX is rising (trend strengthening)
+      // We use a simple check: ADX > 20 and not falling sharply
+      if(m_currentADX < 20)
+         return false;
+      
+      return true;
+   }
+   
+   //--- Check if market is trending UP
+   bool IsTrendingUp()
+   {
+      return (m_currentRegime == REGIME_TRENDING_UP && m_currentPlusDI > m_currentMinusDI);
+   }
+   
+   //--- Check if market is trending DOWN
+   bool IsTrendingDown()
+   {
+      return (m_currentRegime == REGIME_TRENDING_DOWN && m_currentMinusDI > m_currentPlusDI);
+   }
+   
+   //--- Get regime name as string
+   string GetRegimeName()
+   {
+      switch(m_currentRegime)
+      {
+         case REGIME_TRENDING_UP:    return "TRENDING UP";
+         case REGIME_TRENDING_DOWN:  return "TRENDING DOWN";
+         case REGIME_RANGING:        return "RANGING";
+         case REGIME_VOLATILE:       return "VOLATILE";
+         case REGIME_QUIET:          return "QUIET";
+         default:                    return "UNKNOWN";
+      }
+   }
+   
+   //--- Get detailed status
+   string GetStatusString()
+   {
+      string status = "Regime: " + GetRegimeName() + "\n";
+      status += "ADX: " + DoubleToString(m_currentADX, 1) + " (+" + DoubleToString(m_currentPlusDI, 1) + "/-" + DoubleToString(m_currentMinusDI, 1) + ")\n";
+      status += "ATR: " + DoubleToString(m_currentATR, 2) + " (MA: " + DoubleToString(m_atrMA, 2) + ")\n";
+      status += "ATR Ratio: " + DoubleToString(m_atrRatio, 2) + "\n";
+      status += "Tradeable: " + (IsTradeable() ? "YES" : "NO") + "\n";
+      
+      if(m_isRanging) status += "⚠️ Market is RANGING — avoid trading\n";
+      if(m_isQuiet) status += "⚠️ Market is QUIET — low volatility\n";
+      if(m_isVolatile) status += "⚡ Market is VOLATILE — use smaller lots\n";
+      
+      return status;
+   }
+   
+   //--- Getters
+   double GetADX() { return m_currentADX; }
+   double GetPlusDI() { return m_currentPlusDI; }
+   double GetMinusDI() { return m_currentMinusDI; }
+   double GetATR() { return m_currentATR; }
+   double GetATRMA() { return m_atrMA; }
+   double GetATRRatio() { return m_atrRatio; }
+   bool IsRanging() { return m_isRanging; }
+   bool IsTrending() { return m_isTrending; }
+   bool IsVolatile() { return m_isVolatile; }
+   bool IsQuiet() { return m_isQuiet; }
+};
+
+//+------------------------------------------------------------------+
+//| Global instance for quick access                                  |
+//+------------------------------------------------------------------+
+CMarketRegime g_marketRegime;
+
+//+------------------------------------------------------------------+
+//| Quick check function — returns true if market is tradeable        |
+//+------------------------------------------------------------------+
+bool IsMarketTradeable(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+{
+   g_marketRegime.DetectRegime(tf);
+   return g_marketRegime.IsTradeable();
+}
+
+//+------------------------------------------------------------------+
+//| Get market direction bias (+1 = up, -1 = down, 0 = neutral)      |
+//+------------------------------------------------------------------+
+int GetMarketBias(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+{
+   g_marketRegime.DetectRegime(tf);
+   if(g_marketRegime.IsTrendingUp()) return 1;
+   if(g_marketRegime.IsTrendingDown()) return -1;
+   return 0;
+}
+//+------------------------------------------------------------------+
+
+//--- END INLINE: MarketRegime.mqh ---
 
 //+------------------------------------------------------------------+
 //| Check available memory (prevent VirtualAlloc errors)             |

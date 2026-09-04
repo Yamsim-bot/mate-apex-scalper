@@ -48,11 +48,1599 @@
 
 
 
-#include "..\Include\FixedRangeVolumeProfile.mqh"
+//--- INLINE: FixedRangeVolumeProfile.mqh ---
+//+------------------------------------------------------------------+
+//|                                  FixedRangeVolumeProfile.mqh      |
+//|                          Fixed Range Volume Profile Engine        |
+//|                          Computes POC / VAH / VAL / LVN zones     |
+//|                          from bar-level volume distribution        |
+//+------------------------------------------------------------------+
+#ifndef FIXED_RANGE_VOLUME_PROFILE_MQH
+#define FIXED_RANGE_VOLUME_PROFILE_MQH
 
-#include "..\Include\PriceActionPatterns.mqh"
-#include "..\Include\SupportResistance.mqh"
-#include "..\Include\MarketRegime.mqh"
+//--- Maximum number of volume profile zones
+#define FRVP_MAX_ZONES 50
+
+//+------------------------------------------------------------------+
+//| Volume node (single price bucket)                                |
+//+------------------------------------------------------------------+
+struct FRVPNode
+{
+   double      priceLow;       // bucket lower boundary
+   double      priceHigh;      // bucket upper boundary
+   double      priceMid;       // bucket mid price
+   long        volume;         // cumulative volume in this bucket
+   bool        isPOC;          // point of control (highest volume)
+   bool        isVAH;          // value area high boundary
+   bool        isVAL;          // value area low boundary
+   bool        isLVN;          // low volume node (thin area)
+};
+
+//+------------------------------------------------------------------+
+//| FRVP zone (grouped levels for trading)                           |
+//+------------------------------------------------------------------+
+enum FRVPZoneType
+{
+   FRVP_POC,       // Point of Control — max volume
+   FRVP_VAH,       // Value Area High — 70% volume upper
+   FRVP_VAL,       // Value Area Low — 70% volume lower
+   FRVP_HVN,       // High Volume Node — thick liquidity
+   FRVP_LVN        // Low Volume Node — thin / rejection zone
+};
+
+struct FRVPZone
+{
+   FRVPZoneType  type;
+   double        price;          // zone center price
+   double        upper;          // zone upper boundary
+   double        lower;          // zone lower boundary
+   long          volume;         // volume at this zone
+   double        strength;       // 0..1 relative strength vs POC
+};
+
+//+------------------------------------------------------------------+
+//| FRVP computation result                                          |
+//+------------------------------------------------------------------+
+struct FRVPResult
+{
+   double        poc;            // point of control price
+   double        vah;            // value area high
+   double        val;            // value area low
+   double        rangeHigh;      // profile range high
+   double        rangeLow;       // profile range low
+   long          totalVolume;    // total volume in range
+   FRVPZone      zones[];        // tradeable zones
+   int           zoneCount;      // number of zones
+   bool          valid;          // computation succeeded
+};
+
+//+------------------------------------------------------------------+
+//| Volume Profile State (persistent per EA instance)                |
+//+------------------------------------------------------------------+
+struct FRVPState
+{
+   FRVPResult    current;        // latest computed profile
+   datetime      lastCompute;    // when profile was last updated
+   int           computeBar;     // which bar index was the anchor
+};
+
+//+------------------------------------------------------------------+
+//| FRVP: Compute volume profile from bar data                       |
+//|                                                                  |
+//| anchors  = number of recent bars to profile (the "fixed range") |
+//| bucketPips = price range per bucket (in price units, e.g. 0.50  |
+//|              for gold = 50 cents, or 0.00050 for EURUSD = 5 pips)|
+//| valueAreaPct = volume % to include in value area (default 70)   |
+//| hvnThreshold = % of POC volume to qualify as HVN (default 0.7) |
+//| lvnThreshold = % of POC volume below which is LVN (default 0.2) |
+//+------------------------------------------------------------------+
+bool FRVP_Compute(FRVPState &state, string symbol, ENUM_TIMEFRAMES tf,
+                  int anchors, double bucketPips, double valueAreaPct = 70.0,
+                  double hvnThreshold = 0.7, double lvnThreshold = 0.2)
+{
+   //--- Fetch OHLCV data
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, anchors + 1, rates) < anchors + 1)
+      return false;
+
+   //--- Find range high/low over the anchor period
+   double rangeHigh = -DBL_MAX;
+   double rangeLow  =  DBL_MAX;
+   long   totalVol  = 0;
+
+   for(int i = 0; i < anchors; i++)
+   {
+      if(rates[i].high > rangeHigh) rangeHigh = rates[i].high;
+      if(rates[i].low  < rangeLow)  rangeLow  = rates[i].low;
+      totalVol += rates[i].tick_volume;
+   }
+
+   if(rangeHigh <= rangeLow || totalVol <= 0) return false;
+
+   //--- Determine number of buckets
+   double rangeSize = rangeHigh - rangeLow;
+   int numBuckets = (int)MathCeil(rangeSize / bucketPips);
+   if(numBuckets < 3)  numBuckets = 3;
+   if(numBuckets > 100) numBuckets = 100;
+
+   double bucketSize = rangeSize / numBuckets;
+
+   //--- Build volume distribution
+   long bucketVol[];
+   ArrayResize(bucketVol, numBuckets);
+   ArrayInitialize(bucketVol, 0);
+
+   for(int i = 0; i < anchors; i++)
+   {
+      double barLow  = rates[i].low;
+      double barHigh = rates[i].high;
+      long   barVol  = rates[i].tick_volume;
+
+      //--- Distribute volume across buckets this bar touches
+      int loIdx = (int)((barLow - rangeLow) / bucketSize);
+      int hiIdx = (int)((barHigh - rangeLow) / bucketSize);
+      if(loIdx < 0) loIdx = 0;
+      if(hiIdx >= numBuckets) hiIdx = numBuckets - 1;
+
+      int touched = hiIdx - loIdx + 1;
+      if(touched <= 0) touched = 1;
+      long volPerBucket = barVol / touched;
+      if(volPerBucket <= 0) volPerBucket = barVol; // at least 1 tick
+
+      for(int b = loIdx; b <= hiIdx; b++)
+         bucketVol[b] += volPerBucket;
+   }
+
+   //--- Find POC (highest volume bucket)
+   int pocIdx = 0;
+   long maxVol = 0;
+   for(int b = 0; b < numBuckets; b++)
+   {
+      if(bucketVol[b] > maxVol)
+      {
+         maxVol = bucketVol[b];
+         pocIdx = b;
+      }
+   }
+
+   double pocPrice = rangeLow + (pocIdx + 0.5) * bucketSize;
+
+   //--- Compute Value Area (expand outward from POC until ~70% of total volume)
+   long   vaVolTarget = (long)(totalVol * valueAreaPct / 100.0);
+   long   vaVolAccum  = bucketVol[pocIdx];
+   int    vaLoIdx     = pocIdx;
+   int    vaHiIdx     = pocIdx;
+
+   while(vaVolAccum < vaVolTarget)
+   {
+      //--- Expand to the side with more volume
+      long volBelow = (vaLoIdx > 0) ? bucketVol[vaLoIdx - 1] : 0;
+      long volAbove = (vaHiIdx < numBuckets - 1) ? bucketVol[vaHiIdx + 1] : 0;
+
+      if(volBelow == 0 && volAbove == 0) break;
+
+      if(volBelow >= volAbove && vaLoIdx > 0)
+      {
+         vaLoIdx--;
+         vaVolAccum += bucketVol[vaLoIdx];
+      }
+      else if(vaHiIdx < numBuckets - 1)
+      {
+         vaHiIdx++;
+         vaVolAccum += bucketVol[vaHiIdx];
+      }
+      else if(vaLoIdx > 0)
+      {
+         vaLoIdx--;
+         vaVolAccum += bucketVol[vaLoIdx];
+      }
+      else break;
+   }
+
+   double vahPrice = rangeLow + (vaHiIdx + 1) * bucketSize;
+   double valPrice = rangeLow + vaLoIdx * bucketSize;
+
+   //--- Fill result
+   state.current.poc         = pocPrice;
+   state.current.vah         = vahPrice;
+   state.current.val         = valPrice;
+   state.current.rangeHigh   = rangeHigh;
+   state.current.rangeLow    = rangeLow;
+   state.current.totalVolume = totalVol;
+   state.current.valid       = true;
+   state.current.zoneCount   = 0;
+
+   //--- Build zones: POC, VAH, VAL, then scan for HVN and LVN
+   ArrayResize(state.current.zones, FRVP_MAX_ZONES);
+
+   // POC zone
+   state.current.zones[0].type     = FRVP_POC;
+   state.current.zones[0].price    = pocPrice;
+   state.current.zones[0].upper    = pocPrice + bucketSize * 0.5;
+   state.current.zones[0].lower    = pocPrice - bucketSize * 0.5;
+   state.current.zones[0].volume   = maxVol;
+   state.current.zones[0].strength = 1.0;
+
+   // VAH zone
+   state.current.zones[1].type     = FRVP_VAH;
+   state.current.zones[1].price    = vahPrice;
+   state.current.zones[1].upper    = vahPrice + bucketSize * 0.5;
+   state.current.zones[1].lower    = vahPrice - bucketSize * 0.5;
+   state.current.zones[1].volume   = (vaHiIdx >= 0 && vaHiIdx < numBuckets) ? bucketVol[vaHiIdx] : 0;
+   state.current.zones[1].strength = (maxVol > 0) ? (double)state.current.zones[1].volume / maxVol : 0;
+
+   // VAL zone
+   state.current.zones[2].type     = FRVP_VAL;
+   state.current.zones[2].price    = valPrice;
+   state.current.zones[2].upper    = valPrice + bucketSize * 0.5;
+   state.current.zones[2].lower    = valPrice - bucketSize * 0.5;
+   state.current.zones[2].volume   = (vaLoIdx >= 0 && vaLoIdx < numBuckets) ? bucketVol[vaLoIdx] : 0;
+   state.current.zones[2].strength = (maxVol > 0) ? (double)state.current.zones[2].volume / maxVol : 0;
+
+   int zoneIdx = 3;
+
+   //--- Scan for HVN and LVN nodes (excluding POC region)
+   for(int b = 0; b < numBuckets && zoneIdx < FRVP_MAX_ZONES; b++)
+   {
+      // Skip POC bucket and VA interior
+      if(b == pocIdx) continue;
+      if(b >= vaLoIdx && b <= vaHiIdx) continue;
+
+      double strength = (maxVol > 0) ? (double)bucketVol[b] / maxVol : 0;
+
+      if(strength >= hvnThreshold)
+      {
+         // High Volume Node — strong support/resistance
+         state.current.zones[zoneIdx].type     = FRVP_HVN;
+         state.current.zones[zoneIdx].price    = rangeLow + (b + 0.5) * bucketSize;
+         state.current.zones[zoneIdx].upper    = rangeLow + (b + 1) * bucketSize;
+         state.current.zones[zoneIdx].lower    = rangeLow + b * bucketSize;
+         state.current.zones[zoneIdx].volume   = bucketVol[b];
+         state.current.zones[zoneIdx].strength = strength;
+         zoneIdx++;
+      }
+      else if(strength <= lvnThreshold && bucketVol[b] > 0)
+      {
+         // Low Volume Node — price tends to reject / move through quickly
+         state.current.zones[zoneIdx].type     = FRVP_LVN;
+         state.current.zones[zoneIdx].price    = rangeLow + (b + 0.5) * bucketSize;
+         state.current.zones[zoneIdx].upper    = rangeLow + (b + 1) * bucketSize;
+         state.current.zones[zoneIdx].lower    = rangeLow + b * bucketSize;
+         state.current.zones[zoneIdx].volume   = bucketVol[b];
+         state.current.zones[zoneIdx].strength = strength;
+         zoneIdx++;
+      }
+   }
+
+   state.current.zoneCount = zoneIdx;
+   state.lastCompute = rates[0].time;
+   state.computeBar  = anchors;
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Check if price is at a specific zone type                  |
+//| Returns the zone index if within tolerance, -1 otherwise         |
+//+------------------------------------------------------------------+
+int FRVP_AtZone(FRVPResult &profile, double price, FRVPZoneType type, double tolerance)
+{
+   for(int i = 0; i < profile.zoneCount; i++)
+   {
+      if(profile.zones[i].type != type) continue;
+      if(MathAbs(price - profile.zones[i].price) <= tolerance)
+         return i;
+   }
+   return -1;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Check if price is above/below value area                  |
+//| Returns +1 if above VAH, -1 if below VAL, 0 if inside VA       |
+//+------------------------------------------------------------------+
+int FRVP_RelativeToVA(FRVPResult &profile, double price)
+{
+   if(!profile.valid) return 0;
+   if(price > profile.vah) return +1;
+   if(price < profile.val) return -1;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Distance from POC as fraction of profile range            |
+//+------------------------------------------------------------------+
+double FRVP_POCDistance(FRVPResult &profile, double price)
+{
+   if(!profile.valid || profile.rangeHigh <= profile.rangeLow) return 0;
+   return (price - profile.poc) / (profile.rangeHigh - profile.rangeLow);
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Find nearest zone to price (any type)                     |
+//| Returns distance in price units                                  |
+//+------------------------------------------------------------------+
+double FRVP_NearestZoneDistance(FRVPResult &profile, double price)
+{
+   if(!profile.valid || profile.zoneCount == 0) return DBL_MAX;
+   double minDist = DBL_MAX;
+   for(int i = 0; i < profile.zoneCount; i++)
+   {
+      double dist = MathAbs(price - profile.zones[i].price);
+      if(dist < minDist) minDist = dist;
+   }
+   return minDist;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Get nearest zone (any type) — returns zone index or -1    |
+//+------------------------------------------------------------------+
+int FRVP_NearestZone(FRVPResult &profile, double price)
+{
+   if(!profile.valid || profile.zoneCount == 0) return -1;
+   double minDist = DBL_MAX;
+   int    nearest = -1;
+   for(int i = 0; i < profile.zoneCount; i++)
+   {
+      double dist = MathAbs(price - profile.zones[i].price);
+      if(dist < minDist)
+      {
+         minDist = dist;
+         nearest = i;
+      }
+   }
+   return nearest;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Is price at POC?                                           |
+//+------------------------------------------------------------------+
+bool FRVP_AtPOC(FRVPResult &profile, double price, double tolerance)
+{
+   return FRVP_AtZone(profile, price, FRVP_POC, tolerance) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Is price at VAH (resistance)?                              |
+//+------------------------------------------------------------------+
+bool FRVP_AtVAH(FRVPResult &profile, double price, double tolerance)
+{
+   return FRVP_AtZone(profile, price, FRVP_VAH, tolerance) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Is price at VAL (support)?                                 |
+//+------------------------------------------------------------------+
+bool FRVP_AtVAL(FRVPResult &profile, double price, double tolerance)
+{
+   return FRVP_AtZone(profile, price, FRVP_VAL, tolerance) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Is there an HVN nearby?                                    |
+//+------------------------------------------------------------------+
+int FRVP_NearHVN(FRVPResult &profile, double price, double tolerance)
+{
+   return FRVP_AtZone(profile, price, FRVP_HVN, tolerance);
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Is there an LVN nearby?                                    |
+//+------------------------------------------------------------------+
+int FRVP_NearLVN(FRVPResult &profile, double price, double tolerance)
+{
+   return FRVP_AtZone(profile, price, FRVP_LVN, tolerance);
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Get zone name string for logging                           |
+//+------------------------------------------------------------------+
+string FRVP_ZoneName(FRVPZoneType type)
+{
+   switch(type)
+   {
+      case FRVP_POC: return "POC";
+      case FRVP_VAH: return "VAH";
+      case FRVP_VAL: return "VAL";
+      case FRVP_HVN: return "HVN";
+      case FRVP_LVN: return "LVN";
+   }
+   return "???";
+}
+
+//+------------------------------------------------------------------+
+//| FRVP: Print profile summary for debugging                        |
+//+------------------------------------------------------------------+
+void FRVP_PrintProfile(FRVPResult &profile, string symbol)
+{
+   if(!profile.valid)
+   {
+      Print(symbol, " FRVP: no valid profile");
+      return;
+   }
+   Print(symbol, " FRVP | POC=", DoubleToString(profile.poc, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+         " VAH=", DoubleToString(profile.vah, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+         " VAL=", DoubleToString(profile.val, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+         " Range=[", DoubleToString(profile.rangeLow, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+         " .. ", DoubleToString(profile.rangeHigh, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+         "] Vol=", profile.totalVolume,
+         " Zones=", profile.zoneCount);
+}
+
+#endif // FIXED_RANGE_VOLUME_PROFILE_MQH
+
+//--- END INLINE: FixedRangeVolumeProfile.mqh ---
+
+//--- INLINE: PriceActionPatterns.mqh ---
+//+------------------------------------------------------------------+
+//|                                        PriceActionPatterns.mqh    |
+//|                          Enhanced Price Action Pattern Detection  |
+//|                          Pin bar, Engulfing, Engulf, Inside Bar,  |
+//|                          Pin+Engulf combo, OB flip, BOS/CHoCH    |
+//+------------------------------------------------------------------+
+#ifndef PRICE_ACTION_PATTERNS_MQH
+#define PRICE_ACTION_PATTERNS_MQH
+
+//+------------------------------------------------------------------+
+//| Price action signal result                                       |
+//+------------------------------------------------------------------+
+struct PASignal
+{
+   int    direction;    // +1 = bullish, -1 = bearish, 0 = none
+   int    strength;     // 0..4 quality score
+   string patternName;  // human-readable
+};
+
+//+------------------------------------------------------------------+
+//| Pin Bar Detection                                                |
+//| Long wick = rejection. Bullish pin = long lower wick.            |
+//| Bearish pin = long upper wick.                                   |
+//+------------------------------------------------------------------+
+PASignal PA_DetectPinBar(MqlRates &r1, MqlRates &r2, double atr,
+                         double minWickATR = 0.5, double wickBodyRatio = 2.0)
+{
+   PASignal sig = {0, 0, ""};
+
+   double body1   = MathAbs(r1.close - r1.open);
+   double range1  = r1.high - r1.low;
+   double lowerW  = MathMin(r1.close, r1.open) - r1.low;
+   double upperW  = r1.high - MathMax(r1.close, r1.open);
+   double body2   = MathAbs(r2.close - r2.open); // context bar
+
+   if(atr <= 0 || range1 <= 0) return sig;
+
+   //--- Bullish pin bar: long lower wick, small upper wick, close in upper third
+   if(lowerW >= atr * minWickATR && lowerW >= body1 * wickBodyRatio
+      && upperW < body1 * 0.5 && body1 > 0)
+   {
+      sig.direction = +1;
+      sig.strength  = 3;
+      sig.patternName = "PinBar_BULL";
+
+      //--- Boost: pin at prior bar's low or lower (extra rejection)
+      if(r1.low <= r2.low) { sig.strength = 4; sig.patternName = "PinBar_BULL+Low"; }
+   }
+
+   //--- Bearish pin bar: long upper wick, close in lower third
+   if(upperW >= atr * minWickATR && upperW >= body1 * wickBodyRatio
+      && lowerW < body1 * 0.5 && body1 > 0)
+   {
+      sig.direction = -1;
+      sig.strength  = 3;
+      sig.patternName = "PinBar_BEAR";
+
+      if(r1.high >= r2.high) { sig.strength = 4; sig.patternName = "PinBar_BEAR+High"; }
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| Engulfing Pattern Detection                                      |
+//| Bullish: prev bearish bar fully engulfed by current bullish bar. |
+//| Bearish: prev bullish bar fully engulfed by current bearish bar. |
+//+------------------------------------------------------------------+
+PASignal PA_DetectEngulfing(MqlRates &r1, MqlRates &r2, double atr,
+                            double minBodyATR = 0.15)
+{
+   PASignal sig = {0, 0, ""};
+
+   double body1 = MathAbs(r1.close - r1.open);
+   double body2 = MathAbs(r2.close - r2.open);
+   bool   r1Bull = r1.close > r1.open;
+   bool   r1Bear = r1.close < r1.open;
+   bool   r2Bull = r2.close > r2.open;
+   bool   r2Bear = r2.close < r2.open;
+
+   if(atr <= 0) return sig;
+
+   //--- Bullish engulfing: r2 bearish, r1 bullish, r1 body wraps r2 body
+   if(r2Bear && r1Bull && body1 > body2 * 1.1 && body1 > atr * minBodyATR)
+   {
+      if(r1.close > r2.open && r1.open < r2.close)
+      {
+         sig.direction = +1;
+         sig.strength  = 3;
+         sig.patternName = "Engulf_BULL";
+
+         //--- Boost: r1 also closes above r2 high (stronger conviction)
+         if(r1.close > r2.high) { sig.strength = 4; sig.patternName = "Engulf_BULL+CloseAbove"; }
+      }
+   }
+
+   //--- Bearish engulfing: r2 bullish, r1 bearish, r1 body wraps r2 body
+   if(r2Bull && r1Bear && body1 > body2 * 1.1 && body1 > atr * minBodyATR)
+   {
+      if(r1.close < r2.open && r1.open > r2.close)
+      {
+         sig.direction = -1;
+         sig.strength  = 3;
+         sig.patternName = "Engulf_BEAR";
+
+         if(r1.close < r2.low) { sig.strength = 4; sig.patternName = "Engulf_BEAR+CloseBelow"; }
+      }
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| Inside Bar Detection                                             |
+//| Current bar range fully inside previous bar range. Often a       |
+//| consolidation before breakout.                                   |
+//+------------------------------------------------------------------+
+PASignal PA_DetectInsideBar(MqlRates &r1, MqlRates &r2, double atr)
+{
+   PASignal sig = {0, 0, ""};
+   if(atr <= 0) return sig;
+
+   //--- Inside bar: r1 high <= r2 high AND r1 low >= r2 low
+   if(r1.high <= r2.high && r1.low >= r2.low)
+   {
+      //--- Direction determined by breakout context
+      //--- Bullish inside bar: preceding trend was down, expecting reversal up
+      if(r2.close < r2.open) // prev bar was bearish → potential bullish breakout
+      {
+         sig.direction = +1;
+         sig.strength  = 2;
+         sig.patternName = "InsideBar_BULL";
+      }
+      else
+      {
+         sig.direction = -1;
+         sig.strength  = 2;
+         sig.patternName = "InsideBar_BEAR";
+      }
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| Pin + Engulf Combo                                               |
+//| Pin bar followed by engulfing in same direction = strongest PA   |
+//+------------------------------------------------------------------+
+PASignal PA_DetectPinEngulfCombo(MqlRates &rates[], int count, double atr,
+                                  double minWickATR = 0.5, double wickBodyRatio = 2.0,
+                                  double minBodyATR = 0.15)
+{
+   PASignal sig = {0, 0, ""};
+   if(count < 3 || atr <= 0) return sig;
+
+   //--- rates[0]=newest (forming), [1]=last closed, [2]=older
+   //--- Check: bar[2] = pin bar, bar[1] = engulfing confirmation
+   PASignal pin = PA_DetectPinBar(rates[1], rates[2], atr, minWickATR, wickBodyRatio);
+   PASignal eng = PA_DetectEngulfing(rates[1], rates[2], atr, minBodyATR);
+
+   //--- Wait: pin is on [1] (older), engulf on [0] (newer)
+   //--- Actually: r1=bar1 (last closed), r2=bar2 (one before)
+   //--- So pin on bar2 + engulf from bar1→bar2
+   //--- Better: check pin on bar[1] using bar[2] as context, then engulf on bar[0] using bar[1]
+   PASignal pin1 = PA_DetectPinBar(rates[1], rates[2], atr, minWickATR, wickBodyRatio);
+   PASignal eng0 = PA_DetectEngulfing(rates[0], rates[1], atr, minBodyATR);
+
+   if(pin1.direction == +1 && eng0.direction == +1)
+   {
+      sig.direction = +1;
+      sig.strength  = 4; // max strength
+      sig.patternName = "PinEngulf_BULL";
+   }
+   else if(pin1.direction == -1 && eng0.direction == -1)
+   {
+      sig.direction = -1;
+      sig.strength  = 4;
+      sig.patternName = "PinEngulf_BEAR";
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| Three-Bar Reversal (Morning Star / Evening Star)                |
+//| Bar1: large candle in trend direction                            |
+//| Bar2: small body (indecision)                                   |
+//| Bar3: large candle in reversal direction                         |
+//+------------------------------------------------------------------+
+PASignal PA_DetectThreeBarReversal(MqlRates &rates[], int count, double atr,
+                                    double minBodyATR = 0.15)
+{
+   PASignal sig = {0, 0, ""};
+   if(count < 3 || atr <= 0) return sig;
+
+   //--- [2]=oldest, [1]=middle, [0]=newest (but we use last 3 closed: rates[1],rates[2],rates[3])
+   //--- We'll use rates[1]=newest closed, [2]=middle, [3]=oldest
+   //--- Actually: let's use [0]=forming (skip), [1]=newest closed, [2]=middle, [3]=oldest
+   if(count < 4) return sig;
+
+   double o0 = rates[1].open,  c0 = rates[1].close;  // newest closed
+   double o1 = rates[2].open,  c1 = rates[2].close;  // middle
+   double o2 = rates[3].open,  c2 = rates[3].close;  // oldest
+
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double body2 = MathAbs(c2 - o2);
+
+   //--- Morning Star (bullish): bar2=big bearish, bar1=small body, bar0=big bullish
+   if(c2 < o2 && c0 > o0) // bar2 bearish, bar0 bullish
+   {
+      if(body2 > atr * minBodyATR && body0 > atr * minBodyATR && body1 < body2 * 0.4)
+      {
+         sig.direction = +1;
+         sig.strength  = 3;
+         sig.patternName = "MorningStar";
+         //--- Boost: bar0 closes above midpoint of bar2
+         if(c0 > (o2 + c2) / 2.0) { sig.strength = 4; sig.patternName = "MorningStar+"; }
+      }
+   }
+
+   //--- Evening Star (bearish): bar2=big bullish, bar1=small body, bar0=big bearish
+   if(c2 > o2 && c0 < o0)
+   {
+      if(body2 > atr * minBodyATR && body0 > atr * minBodyATR && body1 < body2 * 0.4)
+      {
+         sig.direction = -1;
+         sig.strength  = 3;
+         sig.patternName = "EveningStar";
+         if(c0 < (o2 + c2) / 2.0) { sig.strength = 4; sig.patternName = "EveningStar+"; }
+      }
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| OB Flip (Order Block)                                            |
+//| Last opposing candle before a strong move = institutional zone   |
+//+------------------------------------------------------------------+
+PASignal PA_DetectOBFlip(MqlRates &rates[], int count, double atr,
+                          double minMoveATR = 1.0)
+{
+   PASignal sig = {0, 0, ""};
+   if(count < 4 || atr <= 0) return sig;
+
+   //--- Bullish OB flip: bar[3]=bearish (last bear bar before big up move)
+   //--- bar[2] and bar[1] should show strong bullish movement
+   double move_up   = rates[1].close - rates[3].low;
+   double move_down = rates[3].high - rates[1].close;
+
+   //--- Bullish OB: prev bearish bar + strong bullish follow-through
+   if(rates[3].close < rates[3].open) // bar3 bearish
+   {
+      if(move_up > atr * minMoveATR)
+      {
+         sig.direction = +1;
+         sig.strength  = 3;
+         sig.patternName = "OB_BullFlip";
+         //--- Boost: bar[0] (forming) pulls back to bar[3] body
+         double obHigh = MathMax(rates[3].open, rates[3].close);
+         double obLow  = MathMin(rates[3].open, rates[3].close);
+         if(rates[0].low <= obHigh && rates[0].low >= obLow)
+         { sig.strength = 4; sig.patternName = "OB_BullFlip+Retest"; }
+      }
+   }
+
+   //--- Bearish OB flip
+   if(rates[3].close > rates[3].open) // bar3 bullish
+   {
+      if(move_down > atr * minMoveATR)
+      {
+         sig.direction = -1;
+         sig.strength  = 3;
+         sig.patternName = "OB_BearFlip";
+         double obHigh = MathMax(rates[3].open, rates[3].close);
+         double obLow  = MathMin(rates[3].open, rates[3].close);
+         if(rates[0].high >= obLow && rates[0].high <= obHigh)
+         { sig.strength = 4; sig.patternName = "OB_BearFlip+Retest"; }
+      }
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| BOS / CHoCH Detection                                            |
+//| Break of Structure: price breaks a recent swing in trend dir.    |
+//| Change of Character: price breaks a recent swing AGAINST trend.  |
+//+------------------------------------------------------------------+
+PASignal PA_DetectBOS(MqlRates &rates[], int count, double swingHigh, double swingLow, double atr)
+{
+   PASignal sig = {0, 0, ""};
+   if(count < 2 || atr <= 0) return sig;
+
+   double close = rates[1].close; // last closed bar
+
+   //--- Bullish BOS: close breaks above recent swing high
+   if(swingHigh > 0 && close > swingHigh + atr * 0.1)
+   {
+      sig.direction = +1;
+      sig.strength  = 3;
+      sig.patternName = "BOS_Bull";
+   }
+
+   //--- Bearish BOS: close breaks below recent swing low
+   if(swingLow > 0 && close < swingLow - atr * 0.1)
+   {
+      sig.direction = -1;
+      sig.strength  = 3;
+      sig.patternName = "BOS_Bear";
+   }
+
+   return sig;
+}
+
+//+------------------------------------------------------------------+
+//| Aggregate Price Action Score                                     |
+//| Scans multiple patterns and returns the strongest direction      |
+//| with cumulative score.                                           |
+//+------------------------------------------------------------------+
+PASignal PA_AggregateScore(MqlRates &rates[], int count, double atr,
+                            double swingHigh, double swingLow,
+                            double minWickATR = 0.5, double wickBodyRatio = 2.0,
+                            double minBodyATR = 0.15, double minMoveATR = 1.0)
+{
+   PASignal best = {0, 0, ""};
+
+   //--- Pin bar (on bar[1] using bar[2] as context)
+   if(count >= 2)
+   {
+      PASignal pin = PA_DetectPinBar(rates[1], rates[2], atr, minWickATR, wickBodyRatio);
+      if(pin.direction != 0 && pin.strength > best.strength)
+         best = pin;
+   }
+
+   //--- Engulfing (bar[0] vs bar[1])  — but bar[0] may be forming, so use bar[1] vs bar[2]
+   if(count >= 3)
+   {
+      PASignal eng = PA_DetectEngulfing(rates[1], rates[2], atr, minBodyATR);
+      if(eng.direction != 0 && eng.strength > best.strength)
+         best = eng;
+   }
+
+   //--- Pin+Engulf combo
+   if(count >= 4)
+   {
+      PASignal combo = PA_DetectPinEngulfCombo(rates, count, atr, minWickATR, wickBodyRatio, minBodyATR);
+      if(combo.direction != 0 && combo.strength > best.strength)
+         best = combo;
+   }
+
+   //--- Three-bar reversal
+   if(count >= 4)
+   {
+      PASignal tbr = PA_DetectThreeBarReversal(rates, count, atr, minBodyATR);
+      if(tbr.direction != 0 && tbr.strength > best.strength)
+         best = tbr;
+   }
+
+   //--- OB flip
+   if(count >= 4)
+   {
+      PASignal ob = PA_DetectOBFlip(rates, count, atr, minMoveATR);
+      if(ob.direction != 0 && ob.strength > best.strength)
+         best = ob;
+   }
+
+   //--- BOS
+   if(count >= 2)
+   {
+      PASignal bos = PA_DetectBOS(rates, count, swingHigh, swingLow, atr);
+      if(bos.direction != 0 && bos.strength > best.strength)
+         best = bos;
+   }
+
+   //--- Inside bar (lower priority)
+   if(count >= 3)
+   {
+      PASignal ib = PA_DetectInsideBar(rates[1], rates[2], atr);
+      if(ib.direction != 0 && best.direction == 0)
+         best = ib;
+   }
+
+   return best;
+}
+
+#endif // PRICE_ACTION_PATTERNS_MQH
+
+//--- END INLINE: PriceActionPatterns.mqh ---
+//--- INLINE: SupportResistance.mqh ---
+//+------------------------------------------------------------------+
+//|                                        SupportResistance.mqh     |
+//|                      Multi-TF Support & Resistance Detection     |
+//|                      Swing-based with zone clustering             |
+//|                                                                  |
+//|  Features:                                                       |
+//|  - Swing high/low detection across multiple timeframes           |
+//|  - Zone clustering (merge nearby swing levels)                   |
+//|  - Touch counting (more touches = stronger level)                |
+//|  - Freshness scoring (untested levels are strongest)             |
+//|  - HTF (H4/D1) structural S/R as major levels                   |
+//|  - MTF confluence: level present on 2+ TFs = stronger           |
+//+------------------------------------------------------------------+
+#ifndef SUPPORT_RESISTANCE_MQH
+#define SUPPORT_RESISTANCE_MQH
+
+#define SR_MAX_LEVELS 20
+#define SR_MAX_TOUCHES 10
+
+//+------------------------------------------------------------------+
+//| S/R level                                                        |
+//+------------------------------------------------------------------+
+enum SRLevelType
+{
+   SR_SUPPORT,      // Support level
+   SR_RESISTANCE    // Resistance level
+};
+
+struct SRLevel
+{
+   SRLevelType  type;
+   double       price;          // level center price
+   double       upper;          // zone upper boundary
+   double       lower;          // zone lower boundary
+   int          touches;        // number of times price tested this level
+   int          timeframes;     // bitmask: which TFs this level exists on (1=M1,2=M5,4=M15,8=M30,16=H1,32=H4,64=D1)
+   double       strength;       // 0..1 composite score (touches + MTF confluence + freshness)
+   datetime     firstSeen;      // when level was first detected
+   datetime     lastTest;       // when price last touched this level
+   bool         tested;         // has price bounced from this level at least once
+};
+
+//+------------------------------------------------------------------+
+//| S/R scan result                                                  |
+//+------------------------------------------------------------------+
+struct SRResult
+{
+   SRLevel     supports[];     // support levels (sorted nearest-first)
+   SRLevel     resistances[];  // resistance levels (sorted nearest-first)
+   int         supportCount;
+   int         resistanceCount;
+   bool        valid;
+};
+
+//+------------------------------------------------------------------+
+//| S/R scan state (persistent per EA instance)                     |
+//+------------------------------------------------------------------+
+struct SRState
+{
+   SRResult    current;
+   datetime    lastScan;
+};
+
+//+------------------------------------------------------------------+
+//| Get timeframe bitmask                                             |
+//+------------------------------------------------------------------+
+int SR_TFBitmask(ENUM_TIMEFRAMES tf)
+{
+   switch(tf)
+   {
+      case PERIOD_M1:  return 1;
+      case PERIOD_M5:  return 2;
+      case PERIOD_M15: return 4;
+      case PERIOD_M30: return 8;
+      case PERIOD_H1:  return 16;
+      case PERIOD_H4:  return 32;
+      case PERIOD_D1:  return 64;
+      default:         return 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Detect swing points from a single timeframe                      |
+//| Returns swing highs and lows as price arrays                    |
+//+------------------------------------------------------------------+
+void SR_DetectSwings(string symbol, ENUM_TIMEFRAMES tf, int lookback,
+                     int swingLen, double &highs[], double &lows[])
+{
+   ArrayResize(highs, 0);
+   ArrayResize(lows, 0);
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, lookback, rates) < lookback) return;
+
+   for(int i = swingLen; i < lookback - swingLen; i++)
+   {
+      //--- Swing high
+      bool isHigh = true;
+      for(int j = 1; j <= swingLen; j++)
+      {
+         if(rates[i].high <= rates[i-j].high || rates[i].high <= rates[i+j].high)
+         { isHigh = false; break; }
+      }
+      if(isHigh)
+      {
+         int sz = ArraySize(highs);
+         ArrayResize(highs, sz + 1);
+         highs[sz] = rates[i].high;
+      }
+
+      //--- Swing low
+      bool isLow = true;
+      for(int j = 1; j <= swingLen; j++)
+      {
+         if(rates[i].low >= rates[i-j].low || rates[i].low >= rates[i+j].low)
+         { isLow = false; break; }
+      }
+      if(isLow)
+      {
+         int sz = ArraySize(lows);
+         ArrayResize(lows, sz + 1);
+         lows[sz] = rates[i].low;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Merge nearby levels into zones (cluster within tolerance)        |
+//+------------------------------------------------------------------+
+void SR_MergeLevels(double &levels[], int count, double tolerance, double &merged[], int &mergedCount)
+{
+   if(count == 0) { mergedCount = 0; return; }
+
+   //--- Sort ascending
+   ArraySort(levels);
+
+   ArrayResize(merged, count);
+   mergedCount = 0;
+   merged[0] = levels[0];
+   double clusterSum = levels[0];
+   int clusterCount = 1;
+
+   for(int i = 1; i < count; i++)
+   {
+      if(levels[i] - merged[mergedCount] <= tolerance)
+      {
+         //--- Same cluster — average them
+         clusterSum += levels[i];
+         clusterCount++;
+         merged[mergedCount] = clusterSum / clusterCount;
+      }
+      else
+      {
+         //--- New cluster
+         mergedCount++;
+         merged[mergedCount] = levels[i];
+         clusterSum = levels[i];
+         clusterCount = 1;
+      }
+   }
+   mergedCount++;
+}
+
+//+------------------------------------------------------------------+
+//| Count touches for a level (how many times price bounced)         |
+//+------------------------------------------------------------------+
+int SR_CountTouches(string symbol, ENUM_TIMEFRAMES tf, int lookback,
+                    double level, double tolerance)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, lookback, rates) < 5) return 0;
+
+   int touches = 0;
+   for(int i = 0; i < lookback; i++)
+   {
+      //--- Price touched the level (wick into the zone)
+      if(MathAbs(rates[i].high - level) <= tolerance ||
+         MathAbs(rates[i].low - level) <= tolerance)
+      {
+         touches++;
+      }
+      //--- Also count if price opened or closed near the level
+      if(MathAbs(rates[i].open - level) <= tolerance * 0.5 ||
+         MathAbs(rates[i].close - level) <= tolerance * 0.5)
+      {
+         touches++;
+      }
+   }
+   return touches;
+}
+
+//+------------------------------------------------------------------+
+//| Check if level is on multiple timeframes                         |
+//+------------------------------------------------------------------+
+int SR_MultiTFScore(string symbol, double level, double tolerance)
+{
+   ENUM_TIMEFRAMES tfs[] = {PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+   int tfBits[] = {4, 8, 16, 32, 64};
+   int score = 0;
+
+   for(int t = 0; t < 5; t++)
+   {
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int cnt = CopyRates(symbol, tfs[t], 0, 200, rates);
+      if(cnt < 20) continue;
+
+      for(int i = 2; i < cnt - 2; i++)
+      {
+         //--- Swing high at level?
+         bool isHigh = true;
+         for(int j = 1; j <= 2; j++)
+         {
+            if(rates[i].high <= rates[i-j].high || rates[i].high <= rates[i+j].high)
+            { isHigh = false; break; }
+         }
+         if(isHigh && MathAbs(rates[i].high - level) <= tolerance)
+         { score |= tfBits[t]; break; }
+
+         //--- Swing low at level?
+         bool isLow = true;
+         for(int j = 1; j <= 2; j++)
+         {
+            if(rates[i].low >= rates[i-j].low || rates[i].low >= rates[i+j].low)
+            { isLow = false; break; }
+         }
+         if(isLow && MathAbs(rates[i].low - level) <= tolerance)
+         { score |= tfBits[t]; break; }
+      }
+   }
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| Main S/R scan: detect levels from multiple TFs                  |
+//|                                                                  |
+//| entryTF   = entry timeframe (M5 or M15)                         |
+//| structTF  = structure timeframe (M15 or H1)                     |
+//| majorTFs  = higher TFs for major levels (H4, D1)               |
+//| zoneATR   = zone thickness in ATR multiples                     |
+//+------------------------------------------------------------------+
+bool SR_Scan(SRState &state, string symbol,
+             ENUM_TIMEFRAMES entryTF, ENUM_TIMEFRAMES structTF,
+             double atr, double zoneATR = 0.5, int swingLen = 2)
+{
+   double tolerance = atr * zoneATR;
+   if(tolerance <= 0) tolerance = atr * 0.5;
+
+   //--- Collect swing levels from entry TF + structure TF + H4 + D1
+   double allHighs[];
+   double allLows[];
+   int highCount = 0;
+   int lowCount = 0;
+   ArrayResize(allHighs, 0);
+   ArrayResize(allLows, 0);
+
+   ENUM_TIMEFRAMES scanTFs[] = {entryTF, structTF, PERIOD_H4, PERIOD_D1};
+   int scanLookbacks[] = {100, 200, 300, 500};
+   int scanSwingLens[] = {swingLen, swingLen, 3, 3}; // wider swings on HTF
+
+   for(int t = 0; t < 4; t++)
+   {
+      double h[];
+      double l[];
+      SR_DetectSwings(symbol, scanTFs[t], scanLookbacks[t], scanSwingLens[t], h, l);
+
+      //--- Append to master list
+      for(int i = 0; i < ArraySize(h); i++)
+      {
+         int sz = ArraySize(allHighs);
+         ArrayResize(allHighs, sz + 1);
+         allHighs[sz] = h[i];
+      }
+      for(int i = 0; i < ArraySize(l); i++)
+      {
+         int sz = ArraySize(allLows);
+         ArrayResize(allLows, sz + 1);
+         allLows[sz] = l[i];
+      }
+   }
+
+   //--- Merge nearby swing highs → resistance levels
+   double mergedH[];
+   int mergedHCount = 0;
+   SR_MergeLevels(allHighs, ArraySize(allHighs), tolerance, mergedH, mergedHCount);
+
+   //--- Merge nearby swing lows → support levels
+   double mergedL[];
+   int mergedLCount = 0;
+   SR_MergeLevels(allLows, ArraySize(allLows), tolerance, mergedL, mergedLCount);
+
+   //--- Build resistance levels
+   ArrayResize(state.current.resistances, SR_MAX_LEVELS);
+   state.current.resistanceCount = 0;
+
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   for(int i = 0; i < mergedHCount && state.current.resistanceCount < SR_MAX_LEVELS; i++)
+   {
+      double level = mergedH[i];
+      //--- Only keep levels above current price (resistance)
+      if(level <= bid + atr * 0.2) continue;
+
+      SRLevel sl;
+      sl.type = SR_RESISTANCE;
+      sl.price = level;
+      sl.upper = level + tolerance * 0.5;
+      sl.lower = level - tolerance * 0.5;
+      sl.touches = SR_CountTouches(symbol, entryTF, 200, level, tolerance);
+      sl.timeframes = SR_MultiTFScore(symbol, level, tolerance);
+      //--- MTF score: count number of TF bits set
+      int mtfCount = 0;
+      { int tfmask = sl.timeframes; while(tfmask > 0) { mtfCount += (tfmask & 1); tfmask >>= 1; } }
+      sl.strength = MathMin(1.0, (double)sl.touches / 8.0 * 0.5 +
+                                   (double)mtfCount / 5.0 * 0.5);
+      sl.firstSeen = 0;
+      sl.lastTest = 0;
+      sl.tested = (sl.touches >= 2);
+
+      state.current.resistances[state.current.resistanceCount] = sl;
+      state.current.resistanceCount++;
+   }
+
+   //--- Build support levels
+   ArrayResize(state.current.supports, SR_MAX_LEVELS);
+   state.current.supportCount = 0;
+
+   for(int i = 0; i < mergedLCount && state.current.supportCount < SR_MAX_LEVELS; i++)
+   {
+      double level = mergedL[i];
+      if(level >= bid - atr * 0.2) continue;
+
+      SRLevel sl;
+      sl.type = SR_SUPPORT;
+      sl.price = level;
+      sl.upper = level + tolerance * 0.5;
+      sl.lower = level - tolerance * 0.5;
+      sl.touches = SR_CountTouches(symbol, entryTF, 200, level, tolerance);
+      sl.timeframes = SR_MultiTFScore(symbol, level, tolerance);
+      int mtfCount = 0;
+      { int tfmask = sl.timeframes; while(tfmask > 0) { mtfCount += (tfmask & 1); tfmask >>= 1; } }
+      sl.strength = MathMin(1.0, (double)sl.touches / 8.0 * 0.5 +
+                                   (double)mtfCount / 5.0 * 0.5);
+      sl.firstSeen = 0;
+      sl.lastTest = 0;
+      sl.tested = (sl.touches >= 2);
+
+      state.current.supports[state.current.supportCount] = sl;
+      state.current.supportCount++;
+   }
+
+   state.current.valid = (state.current.supportCount > 0 || state.current.resistanceCount > 0);
+   state.lastScan = TimeCurrent();
+
+   return state.current.valid;
+}
+
+//+------------------------------------------------------------------+
+//| Is price near a support level?                                   |
+//| Returns the support index or -1                                  |
+//+------------------------------------------------------------------+
+int SR_NearSupport(SRResult &result, double price, double tolerance)
+{
+   double minDist = DBL_MAX;
+   int nearest = -1;
+   for(int i = 0; i < result.supportCount; i++)
+   {
+      double dist = MathAbs(price - result.supports[i].price);
+      if(dist <= tolerance && dist < minDist)
+      { minDist = dist; nearest = i; }
+   }
+   return nearest;
+}
+
+//+------------------------------------------------------------------+
+//| Is price near a resistance level?                                |
+//| Returns the resistance index or -1                               |
+//+------------------------------------------------------------------+
+int SR_NearResistance(SRResult &result, double price, double tolerance)
+{
+   double minDist = DBL_MAX;
+   int nearest = -1;
+   for(int i = 0; i < result.resistanceCount; i++)
+   {
+      double dist = MathAbs(price - result.resistances[i].price);
+      if(dist <= tolerance && dist < minDist)
+      { minDist = dist; nearest = i; }
+   }
+   return nearest;
+}
+
+//+------------------------------------------------------------------+
+//| Get nearest support below price (for SL placement)              |
+//+------------------------------------------------------------------+
+double SR_NearestSupportBelow(SRResult &result, double price)
+{
+   double best = 0;
+   double minDist = DBL_MAX;
+   for(int i = 0; i < result.supportCount; i++)
+   {
+      if(result.supports[i].price < price)
+      {
+         double dist = price - result.supports[i].price;
+         if(dist < minDist) { minDist = dist; best = result.supports[i].price; }
+      }
+   }
+   return best;
+}
+
+//+------------------------------------------------------------------+
+//| Get nearest resistance above price (for TP target)              |
+//+------------------------------------------------------------------+
+double SR_NearestResistanceAbove(SRResult &result, double price)
+{
+   double best = 0;
+   double minDist = DBL_MAX;
+   for(int i = 0; i < result.resistanceCount; i++)
+   {
+      if(result.resistances[i].price > price)
+      {
+         double dist = result.resistances[i].price - price;
+         if(dist < minDist) { minDist = dist; best = result.resistances[i].price; }
+      }
+   }
+   return best;
+}
+
+//+------------------------------------------------------------------+
+//| Get nearest support above price (for sell SL placement)         |
+//+------------------------------------------------------------------+
+double SR_NearestSupportAbove(SRResult &result, double price)
+{
+   double best = 0;
+   double minDist = DBL_MAX;
+   for(int i = 0; i < result.supportCount; i++)
+   {
+      if(result.supports[i].price > price)
+      {
+         double dist = result.supports[i].price - price;
+         if(dist < minDist) { minDist = dist; best = result.supports[i].price; }
+      }
+   }
+   return best;
+}
+
+//+------------------------------------------------------------------+
+//| Get nearest resistance below price (for sell TP target)         |
+//+------------------------------------------------------------------+
+double SR_NearestResistanceBelow(SRResult &result, double price)
+{
+   double best = 0;
+   double minDist = DBL_MAX;
+   for(int i = 0; i < result.resistanceCount; i++)
+   {
+      if(result.resistances[i].price < price)
+      {
+         double dist = price - result.resistances[i].price;
+         if(dist < minDist) { minDist = dist; best = result.resistances[i].price; }
+      }
+   }
+   return best;
+}
+
+//+------------------------------------------------------------------+
+//| Is price at support (buy zone)?                                  |
+//+------------------------------------------------------------------+
+bool SR_AtSupport(SRResult &result, double price, double tolerance)
+{
+   return SR_NearSupport(result, price, tolerance) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| Is price at resistance (sell zone)?                              |
+//+------------------------------------------------------------------+
+bool SR_AtResistance(SRResult &result, double price, double tolerance)
+{
+   return SR_NearResistance(result, price, tolerance) >= 0;
+}
+
+//+------------------------------------------------------------------+
+//| Print S/R summary for debugging                                  |
+//+------------------------------------------------------------------+
+void SR_PrintLevels(SRResult &result, string symbol)
+{
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   Print(symbol, " S/R | Supports=", result.supportCount,
+         " Resistances=", result.resistanceCount);
+   for(int i = 0; i < result.supportCount; i++)
+   {
+      Print("  S#", i, " price=", DoubleToString(result.supports[i].price, digits),
+            " touches=", result.supports[i].touches,
+            " tfBit=", result.supports[i].timeframes,
+            " str=", DoubleToString(result.supports[i].strength, 2));
+   }
+   for(int i = 0; i < result.resistanceCount; i++)
+   {
+      Print("  R#", i, " price=", DoubleToString(result.resistances[i].price, digits),
+            " touches=", result.resistances[i].touches,
+            " tfBit=", result.resistances[i].timeframes,
+            " str=", DoubleToString(result.resistances[i].strength, 2));
+   }
+}
+
+#endif // SUPPORT_RESISTANCE_MQH
+
+//--- END INLINE: SupportResistance.mqh ---
+//--- INLINE: MarketRegime.mqh ---
+//+------------------------------------------------------------------+
+//|                                            MarketRegime.mqh       |
+//|               Market Regime Filter — Avoid Ranging Markets         |
+//|               Uses ADX + ATR Compression + Session Volume          |
+//+------------------------------------------------------------------+
+#property copyright "XAU MATE Trading"
+#property version   "1.00"
+#property description "Market regime detection: Trending vs Ranging"
+
+//--- Market Regime Enum
+enum ENUM_MARKET_REGIME
+{
+   REGIME_TRENDING_UP,     // Trending Up (ADX > threshold, +DI > -DI)
+   REGIME_TRENDING_DOWN,   // Trending Down (ADX > threshold, -DI > +DI)
+   REGIME_RANGING,         // Ranging (ADX < threshold)
+   REGIME_VOLATILE,        // High Volatility (ATR spike)
+   REGIME_QUIET            // Low Volatility (ATR compression)
+};
+
+//+------------------------------------------------------------------+
+//| Market Regime Detector Class                                      |
+//+------------------------------------------------------------------+
+class CMarketRegime
+{
+private:
+   int      m_adxPeriod;
+   int      m_atrPeriod;
+   double   m_adxTrendThreshold;    // Above this = trending (default 25)
+   double   m_adxStrongThreshold;   // Above this = strong trend (default 40)
+   double   m_atrCompressionRatio;  // ATR/MA_ATR below this = compression
+   double   m_atrExpansionRatio;    // ATR/MA_ATR above this = expansion
+   int      m_maPeriod;             // MA period for ATR smoothing
+   
+   ENUM_MARKET_REGIME m_currentRegime;
+   double   m_currentADX;
+   double   m_currentPlusDI;
+   double   m_currentMinusDI;
+   double   m_currentATR;
+   double   m_atrMA;
+   double   m_atrRatio;
+   bool     m_isRanging;
+   bool     m_isTrending;
+   bool     m_isVolatile;
+   bool     m_isQuiet;
+   
+public:
+   //--- Constructor
+   CMarketRegime(int adxPeriod = 14, int atrPeriod = 14, int maPeriod = 50)
+   {
+      m_adxPeriod = adxPeriod;
+      m_atrPeriod = atrPeriod;
+      m_maPeriod = maPeriod;
+      m_adxTrendThreshold = 25.0;
+      m_adxStrongThreshold = 40.0;
+      m_atrCompressionRatio = 0.7;
+      m_atrExpansionRatio = 1.3;
+      m_currentRegime = REGIME_RANGING;
+      m_currentADX = 0;
+      m_currentPlusDI = 0;
+      m_currentMinusDI = 0;
+      m_currentATR = 0;
+      m_atrMA = 0;
+      m_atrRatio = 1.0;
+      m_isRanging = true;
+      m_isTrending = false;
+      m_isVolatile = false;
+      m_isQuiet = false;
+   }
+   
+   //--- Set thresholds
+   void SetThresholds(double adxTrend = 25.0, double adxStrong = 40.0, 
+                      double atrComp = 0.7, double atrExp = 1.3)
+   {
+      m_adxTrendThreshold = adxTrend;
+      m_adxStrongThreshold = adxStrong;
+      m_atrCompressionRatio = atrComp;
+      m_atrExpansionRatio = atrExp;
+   }
+   
+   //--- Calculate ADX and DI values
+   bool CalcADX(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      double plusDI[], minusDI[], adx[];
+      ArraySetAsSeries(plusDI, true);
+      ArraySetAsSeries(minusDI, true);
+      ArraySetAsSeries(adx, true);
+      
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 0, 0, m_adxPeriod + 5, adx) < m_adxPeriod)
+         return false;
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 1, 0, m_adxPeriod + 5, plusDI) < m_adxPeriod)
+         return false;
+      if(CopyBuffer(iADX(_Symbol, tf, m_adxPeriod, PRICE_CLOSE), 2, 0, m_adxPeriod + 5, minusDI) < m_adxPeriod)
+         return false;
+      
+      m_currentADX = adx[0];
+      m_currentPlusDI = plusDI[0];
+      m_currentMinusDI = minusDI[0];
+      
+      return true;
+   }
+   
+   //--- Calculate ATR and its moving average
+   bool CalcATRRegime(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      
+      int atrHandle = iATR(_Symbol, tf, m_atrPeriod);
+      if(atrHandle == INVALID_HANDLE) return false;
+      
+      if(CopyBuffer(atrHandle, 0, 0, m_maPeriod + 5, atr) < m_maPeriod)
+         return false;
+      
+      m_currentATR = atr[0];
+      
+      // Calculate MA of ATR
+      double sum = 0;
+      for(int i = 0; i < m_maPeriod; i++)
+         sum += atr[i];
+      m_atrMA = sum / m_maPeriod;
+      
+      // ATR ratio (current / MA)
+      m_atrRatio = (m_atrMA > 0) ? m_currentATR / m_atrMA : 1.0;
+      
+      return true;
+   }
+   
+   //--- Detect market regime
+   ENUM_MARKET_REGIME DetectRegime(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+   {
+      if(!CalcADX(tf)) return REGIME_RANGING;
+      if(!CalcATRRegime(tf)) return REGIME_RANGING;
+      
+      // Determine regime
+      bool adxTrending = (m_currentADX >= m_adxTrendThreshold);
+      bool adxStrong = (m_currentADX >= m_adxStrongThreshold);
+      bool plusDIDominant = (m_currentPlusDI > m_currentMinusDI);
+      bool minusDIDominant = (m_currentMinusDI > m_currentPlusDI);
+      bool atrCompressed = (m_atrRatio < m_atrCompressionRatio);
+      bool atrExpanded = (m_atrRatio > m_atrExpansionRatio);
+      
+      // Set boolean flags
+      m_isRanging = !adxTrending || atrCompressed;
+      m_isTrending = adxTrending && !atrCompressed;
+      m_isVolatile = atrExpanded && adxTrending;
+      m_isQuiet = atrCompressed && !adxTrending;
+      
+      // Determine regime
+      if(adxStrong && plusDIDominant)
+         m_currentRegime = REGIME_TRENDING_UP;
+      else if(adxStrong && minusDIDominant)
+         m_currentRegime = REGIME_TRENDING_DOWN;
+      else if(adxTrending && plusDIDominant)
+         m_currentRegime = REGIME_TRENDING_UP;
+      else if(adxTrending && minusDIDominant)
+         m_currentRegIME = REGIME_TRENDING_DOWN;
+      else if(atrExpanded)
+         m_currentRegime = REGIME_VOLATILE;
+      else if(atrCompressed)
+         m_currentRegime = REGIME_QUIET;
+      else
+         m_currentRegime = REGIME_RANGING;
+      
+      return m_currentRegime;
+   }
+   
+   //--- Check if market is tradeable (not ranging)
+   bool IsTradeable()
+   {
+      // Don't trade if:
+      // 1. Market is ranging (ADX < 25)
+      // 2. ATR is compressed (low volatility)
+      // 3. ADX is falling (weakening trend)
+      
+      if(m_isRanging)
+         return false;
+      
+      if(m_isQuiet)
+         return false;
+      
+      // Check if ADX is rising (trend strengthening)
+      // We use a simple check: ADX > 20 and not falling sharply
+      if(m_currentADX < 20)
+         return false;
+      
+      return true;
+   }
+   
+   //--- Check if market is trending UP
+   bool IsTrendingUp()
+   {
+      return (m_currentRegime == REGIME_TRENDING_UP && m_currentPlusDI > m_currentMinusDI);
+   }
+   
+   //--- Check if market is trending DOWN
+   bool IsTrendingDown()
+   {
+      return (m_currentRegime == REGIME_TRENDING_DOWN && m_currentMinusDI > m_currentPlusDI);
+   }
+   
+   //--- Get regime name as string
+   string GetRegimeName()
+   {
+      switch(m_currentRegime)
+      {
+         case REGIME_TRENDING_UP:    return "TRENDING UP";
+         case REGIME_TRENDING_DOWN:  return "TRENDING DOWN";
+         case REGIME_RANGING:        return "RANGING";
+         case REGIME_VOLATILE:       return "VOLATILE";
+         case REGIME_QUIET:          return "QUIET";
+         default:                    return "UNKNOWN";
+      }
+   }
+   
+   //--- Get detailed status
+   string GetStatusString()
+   {
+      string status = "Regime: " + GetRegimeName() + "\n";
+      status += "ADX: " + DoubleToString(m_currentADX, 1) + " (+" + DoubleToString(m_currentPlusDI, 1) + "/-" + DoubleToString(m_currentMinusDI, 1) + ")\n";
+      status += "ATR: " + DoubleToString(m_currentATR, 2) + " (MA: " + DoubleToString(m_atrMA, 2) + ")\n";
+      status += "ATR Ratio: " + DoubleToString(m_atrRatio, 2) + "\n";
+      status += "Tradeable: " + (IsTradeable() ? "YES" : "NO") + "\n";
+      
+      if(m_isRanging) status += "⚠️ Market is RANGING — avoid trading\n";
+      if(m_isQuiet) status += "⚠️ Market is QUIET — low volatility\n";
+      if(m_isVolatile) status += "⚡ Market is VOLATILE — use smaller lots\n";
+      
+      return status;
+   }
+   
+   //--- Getters
+   double GetADX() { return m_currentADX; }
+   double GetPlusDI() { return m_currentPlusDI; }
+   double GetMinusDI() { return m_currentMinusDI; }
+   double GetATR() { return m_currentATR; }
+   double GetATRMA() { return m_atrMA; }
+   double GetATRRatio() { return m_atrRatio; }
+   bool IsRanging() { return m_isRanging; }
+   bool IsTrending() { return m_isTrending; }
+   bool IsVolatile() { return m_isVolatile; }
+   bool IsQuiet() { return m_isQuiet; }
+};
+
+//+------------------------------------------------------------------+
+//| Global instance for quick access                                  |
+//+------------------------------------------------------------------+
+CMarketRegime g_marketRegime;
+
+//+------------------------------------------------------------------+
+//| Quick check function — returns true if market is tradeable        |
+//+------------------------------------------------------------------+
+bool IsMarketTradeable(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+{
+   g_marketRegime.DetectRegime(tf);
+   return g_marketRegime.IsTradeable();
+}
+
+//+------------------------------------------------------------------+
+//| Get market direction bias (+1 = up, -1 = down, 0 = neutral)      |
+//+------------------------------------------------------------------+
+int GetMarketBias(ENUM_TIMEFRAMES tf = PERIOD_CURRENT)
+{
+   g_marketRegime.DetectRegime(tf);
+   if(g_marketRegime.IsTrendingUp()) return 1;
+   if(g_marketRegime.IsTrendingDown()) return -1;
+   return 0;
+}
+//+------------------------------------------------------------------+
+
+//--- END INLINE: MarketRegime.mqh ---
 
 
 //+------------------------------------------------------------------+
