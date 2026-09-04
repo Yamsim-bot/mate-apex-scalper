@@ -68,7 +68,7 @@ input double   MaxLotSize            = 0.05;   // Hard max lot size (safety cap)
 //--- Safety Limits
 input int      MaxPositions          = 1;      // Max positions (was 2)
 input int      MaxDailyTrades        = 15;     // Max trades per day (10-15 for scalp)
-input double   MaxDailyLossPct       = 3.0;    // Stop trading at this loss %
+input double   MaxDailyLossPct       = 2.0;    // HARD STOP: close all positions at 2% daily loss
 input int      MaxTPHits             = 5;      // Pause after X TPs hit PER SESSION
 input bool     ResetOnNewSession    = true;   // Reset TP counter on new session
 input int      CooldownSeconds       = 300;    // Minimum seconds between trades (5 min)

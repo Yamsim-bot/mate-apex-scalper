@@ -187,7 +187,12 @@ bool CanTrade()
    if(gDayTrades >= MaxTradesPerDay) return false;
    
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(gDailyPnL <= -(bal * MaxDailyLossPct / 100.0)) return false;
+   if(gDailyPnL <= -(bal * MaxDailyLossPct / 100.0))
+   {
+      Print("*** HARD STOP: DAILY LOSS LIMIT ", MaxDailyLossPct, "% — CLOSING ALL ***");
+      CloseAllPositions();
+      return false;
+   }
    
    return true;
 }
@@ -700,5 +705,32 @@ void ShowComment()
    }
    
    Comment(c);
+}
+
+//+------------------------------------------------------------------+
+//| Close all open positions (hard daily loss stop)                  |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      
+      MqlTradeRequest request = {};
+      MqlTradeResult result = {};
+      request.action   = TRADE_ACTION_DEAL;
+      request.symbol   = PositionGetString(POSITION_SYMBOL);
+      request.volume   = PositionGetDouble(POSITION_VOLUME);
+      request.type     = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      request.price    = (request.type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      request.deviation = 50;
+      request.magic    = MagicNumber;
+      request.position = ticket;
+      
+      OrderSend(request, result);
+   }
 }
 //+------------------------------------------------------------------+

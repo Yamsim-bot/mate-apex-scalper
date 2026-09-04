@@ -1549,7 +1549,8 @@ void ResetDaily()
       if(ddPct >= MaxDailyRiskPct)
       {
          g_stats.tradingStopped = true;
-         Print("*** MAX DAILY LOSS: ", DoubleToString(ddPct, 2), "% ***");
+         Print("*** HARD STOP: MAX DAILY LOSS ", DoubleToString(ddPct, 2), "% — CLOSING ALL POSITIONS ***");
+         CloseAllPositions("DAILY_LOSS_LIMIT");
       }
    }
 }

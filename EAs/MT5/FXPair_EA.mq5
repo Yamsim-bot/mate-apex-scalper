@@ -215,7 +215,7 @@ input int      MaxGlobalPositions  = 6;            // Max total open positions (
 
 input int      MaxDailyTrades      = 30;           // Max trades per day (all symbols) (was 20)
 
-input double   MaxDailyLossPct     = 5.0;          // Stop trading at this daily loss %
+input double   MaxDailyLossPct     = 2.0;          // HARD STOP: close all positions at 2% daily loss
 
 input int      MaxTPHits           = 5;            // Pause after X TPs hit PER SESSION
 
@@ -3144,16 +3144,11 @@ void CheckDailyReset()
 
    {
 
-      double lossPct = (g_dailyStartBalance - currBalance) / g_dailyStartBalance * 100.0;
-
-      if(lossPct >= MaxDailyLossPct)
-
+      double lossPct = (g_dailyStartBalance - currBalance) / g_dailyStartBalance * 100.0;      if(lossPct >= MaxDailyLossPct)
       {
-
          g_tradingPaused = true;
-
-         Print("Max daily loss (", DoubleToString(lossPct, 1), "%) reached. Paused.");
-
+         Print("*** HARD STOP: DAILY LOSS LIMIT ", DoubleToString(lossPct, 1), "% — CLOSING ALL ***");
+         CloseAllFXPairPositions();
       }
 
    }
