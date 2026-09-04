@@ -40,7 +40,7 @@ input double   Reject_Wick_ATR     = 0.04;     // Min rejection wick (xATR)
 input bool     UseRejection        = false;    // Require rejection candle
 
 //--- Trade Settings
-input int      MaxPositions        = 1;        // Max concurrent positions (was 2)
+input int      MaxPositions        = 2;        // Max concurrent positions
 input double   RiskPercent         = 0.5;      // % risk per trade
 input int      MaxDailyTrades      = 30;       // Max trades per day
 input double   MaxDailyLossPct     = 5.0;      // Max daily loss %
