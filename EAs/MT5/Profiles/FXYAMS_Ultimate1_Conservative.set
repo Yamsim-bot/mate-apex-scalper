@@ -1,0 +1,26 @@
+; FXYAMS_Ultimate1 Conservative — RiskPercent=0.25, Min_RR=1.5, TrendMode ON, ScalpMode OFF
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in PH (UTC+8):
+; London 07-16 UTC = 15-00 PH -> tight core 16-20 PH / NY 16-21 UTC = 00-05 PH -> tight core 00-03 PH
+RiskPercent=0.25
+MaxDailyLossPct=2.5
+MaxPositions=1
+MaxDailyTrades=10
+MaxTPHits=3
+ResetOnNewSession=true
+Min_RR=1.5
+ScalpMode=false
+TrendMode=true
+UseSessionFilter=true
+SessionStartHour=16
+SessionStartMin=0
+SessionEndHour=20
+SessionEndMin=0
+Session2StartHour=0
+Session2StartMin=0
+Session2EndHour=3
+Session2EndMin=0
+UseTrailing=true
+UseBreakEven=true
+UsePartialTP=true
+MagicNumber=20260716
+CommentPrefix=ULTI_EA

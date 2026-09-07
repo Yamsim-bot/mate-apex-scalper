@@ -13,8 +13,10 @@
 //| v2.10: TrendMode trend-following leg (pullback + breakout, no RSI)|
 //+------------------------------------------------------------------+
 #property copyright "FXYAMS Replication Project"
-#property version   "2.10"
+#property version   "2.20"
 #property description "FXYAMS_Ultimate1 v2.10: Structure scalper + TrendMode trend-following leg"
+
+#include "SaneTrade.mqh"   // shared guards: movement, news, holiday, day locks
 
 //--- Trend Filter (M15)
 input int      MA_Fast_Period      = 50;       // Fast MA Period (M15)
@@ -42,8 +44,8 @@ input bool     UseRejection        = false;    // Require rejection candle
 //--- Trade Settings
 input int      MaxPositions        = 2;        // Max concurrent positions
 input double   RiskPercent         = 0.5;      // % risk per trade
-input int      MaxDailyTrades      = 30;       // Max trades per day
-input double   MaxDailyLossPct     = 5.0;      // Max daily loss %
+input int      MaxDailyTrades      = 12;       // Max trades per day (profit-first: was 30)
+input double   MaxDailyLossPct     = 2.0;      // Max daily loss % (profit-first: was 5.0)
 input int      MaxTPHits           = 8;        // Pause after X TPs hit PER SESSION
 input bool     ResetOnNewSession  = true;     // Reset TP counter on new session
 
@@ -51,7 +53,7 @@ input bool     ResetOnNewSession  = true;     // Reset TP counter on new session
 input double   SL_ATR_Mult         = 0.5;      // SL beyond structure (xATR)
 input double   Min_SL_ATR          = 1.0;      // Min SL distance (xATR, was 0.3 — sub-ATR stops got clipped in noise)
 input double   Max_SL_ATR          = 1.2;      // Max SL distance (xATR, was 1.5)
-input double   Min_RR              = 1.0;      // Minimum reward:risk (anti-bleed: >= 1:1)
+input double   Min_RR              = 1.5;      // Minimum reward:risk (profit-first: was 1.0)
 
 //--- Partial Take-Profit
 input bool     UsePartialTP        = true;     // Enable partial TP
@@ -84,6 +86,13 @@ input bool     TradeTuesday        = true;
 input bool     TradeWednesday      = true;
 input bool     TradeThursday       = true;
 input bool     TradeFriday         = true;
+
+//--- SaneTrade shared guards (movement, news, holiday, profit lock)
+input bool     SaneMovement        = true;       // Skip dead/flat market
+input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
+input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
+input double   SaneProfitLockPct   = 1.5;        // Halt new entries after +X% day
 
 //--- Scalp Mode (v3.0)
 input bool     ScalpMode           = true;       // Enable scalp mode (relaxed filters)
@@ -141,6 +150,25 @@ struct DailyStats {
 DailyStats g_dailyStats;
 datetime   g_lastResetDay = 0;
 datetime   g_lastBarTime  = 0;
+
+//--- Once-per-deal TP log guard (log-spam fix): tickets already counted+logged.
+//    DetectTPHits() runs every tick; without this the same historical TP deals
+//    are re-counted and re-Printed on every tick (unbounded tpHits + log spam).
+//    Cleared whenever the TP counter resets (new day / new session).
+ulong g_loggedTPTickets[];
+bool IsTPDealLogged(ulong ticket)
+{
+   for(int i = ArraySize(g_loggedTPTickets) - 1; i >= 0; i--)
+      if(g_loggedTPTickets[i] == ticket) return true;
+   return false;
+}
+void MarkTPDealLogged(ulong ticket)
+{
+   int n = ArraySize(g_loggedTPTickets);
+   ArrayResize(g_loggedTPTickets, n + 1);
+   g_loggedTPTickets[n] = ticket;
+}
+void ClearLoggedTPDeals() { ArrayResize(g_loggedTPTickets, 0); }
 
 //+------------------------------------------------------------------+
 //| Auto-detect fill mode                                             |
@@ -324,6 +352,7 @@ int OnInit()
    g_dailyStats.startingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    g_dailyStats.date = 0;
    g_lastResetDay = 0;
+   ClearLoggedTPDeals();   // (re-)init starts with an empty logged-TP set
    g_swingReady = false;
 
    ArrayResize(g_swingHighIdx, 0);
@@ -386,6 +415,7 @@ void ResetDaily()
       g_dailyStats.tradingStopped = false;
       g_dailyStats.lastTPReset = today;
       g_lastResetDay = today;
+      ClearLoggedTPDeals();   // fresh day -> fresh TP-deal set (counter reset)
    }
 
    //--- Detect session change -> reset TP counter for new session
@@ -396,6 +426,7 @@ void ResetDaily()
       g_dailyStats.tpHits = 0;
       g_dailyStats.tpPause = false;
       g_dailyStats.lastTPReset = TimeCurrent();
+      ClearLoggedTPDeals();   // fresh session -> fresh TP-deal set (counter reset)
       if(newSession > 0)
          Print("SESSION CHANGE -> ", (newSession == 1 ? "LONDON" : "NY"),
                " | TP counter reset. Fresh ", MaxTPHits, " TPs available.");
@@ -437,6 +468,21 @@ bool CanTrade()
    double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(spread > MaxSpreadPts) return false;
 
+   //--- SaneTrade guards: holiday, news, dead market
+   if(SaneHoliday && SANE_IsHoliday()) return false;
+   if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return false;
+   if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return false;
+
+   //--- Profit lock (mirror of loss halt, equity-based)
+   double up = (AccountInfoDouble(ACCOUNT_EQUITY) - g_dailyStats.startingBalance)
+               / MathMax(g_dailyStats.startingBalance, 1.0) * 100.0;
+   if(up >= SaneProfitLockPct)
+   {
+      g_dailyStats.tradingStopped = true;
+      Print("LOCKED: Daily profit +", DoubleToString(up, 2), "% reached. No new entries today.");
+      return false;
+   }
+
    return true;
 }
 
@@ -446,6 +492,9 @@ bool CanTrade()
 void DetectTPHits()
 {
    ResetDaily();
+
+   // Already paused for this session — nothing new to detect, stop re-scanning
+   if(g_dailyStats.tpPause) return;
 
    // Only count deals from current session start (not entire day)
    datetime sessionStart = g_dailyStats.lastTPReset;
@@ -466,11 +515,10 @@ void DetectTPHits()
       long reason = HistoryDealGetInteger(ticket, DEAL_REASON);
       if(reason == DEAL_REASON_TP)
       {
-         static datetime lastTPDealTime = 0;
-         static ulong lastTPDealTicket = 0;
-         if(dealTime == lastTPDealTime && ticket == lastTPDealTicket) continue;
-         lastTPDealTime = dealTime;
-         lastTPDealTicket = ticket;
+         // Once-per-deal guard: re-scanning history every tick must not
+         // re-count/re-log a deal already counted on a previous tick.
+         if(IsTPDealLogged(ticket)) continue;
+         MarkTPDealLogged(ticket);
 
          g_dailyStats.tpHits++;
          double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);

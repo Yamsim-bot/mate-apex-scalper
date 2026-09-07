@@ -42,7 +42,7 @@
 
 #property copyright "FXPair EA v2.0"
 
-#property version   "2.00"
+#property version   "2.12"
 
 #property description "Forex Confluence Day Trader — Multi-Symbol, Relaxed Filters"
 
@@ -65,7 +65,7 @@
 
 //--- Multi-symbol
 
-input string   SymbolList          = "EURUSD+"; // Symbols to trade (comma-sep). Was EURJPY+ — but the account clamps
+input string   SymbolList          = "EURUSD+,GBPUSD+,USDJPY+,USDCHF+,USDCAD+,AUDUSD+"; // Symbols to trade (comma-sep). v2.10: Major FX pairs (AUDUSD+ restored 2026-09-07). Remote override via Files\FXPair_Symbols.txt (one line).
 
                                                // EURJPY stops to ~1% of price (~185 pips), making tight-stop scalping
 
@@ -115,7 +115,21 @@ input double   RSI_Sell_Min        = 20.0;         // RSI must be >= this for SE
 
 //--- Confluence
 
-input int      ConfluenceMinScore  = 1;            // Minimum confluence to enter (was 3)
+input int      ConfluenceMinScore  = 3;            // Minimum confluence to enter (v2.11 tightened: was 1)
+input int      MinConfluenceGap    = 2;            // Winner must beat loser by this margin (v2.11: kills coin-flip 3v2 entries)
+
+//--- v2.12 smart trading: pair sessions, movement, news/holiday, best-only, profit-first
+input bool     UsePairSessions     = true;         // Trade each pair only in its own window (PH time)
+input int      EU_SessionStart     = 14;           // EUR/GBP/CHF/CAD tradable from (PH, London pre-open)
+input int      EU_SessionEnd       = 5;            // ...to (PH, NY close; overnight wrap ok)
+input int      Asia_SessionStart   = 6;            // JPY/AUD/NZD tradable from (PH, Sydney/Tokyo open)
+input int      Asia_SessionEnd     = 2;            // ...to (PH)
+input bool     UseVolatilityFilter = true;         // Skip dead/flat market
+input int      MinMovePoints       = 100;          // Min range of last closed M15 bar (points)
+input bool     UseNewsFilter       = true;         // Blackout file: Files\FXPair_NewsBlackout.txt (maintained remotely)
+input bool     UseHolidayFilter    = true;         // Skip Dec 25 / Jan 1 + file-listed holidays
+input bool     TradeBestOnly       = true;         // ONE new trade per scan: top-scoring pair only
+input double   DailyProfitLockPct  = 1.5;          // Halt new entries after +X% day (lock gains)
 
 input int      SwingLookback       = 2;            // Bars each side for swing detection
 
@@ -153,7 +167,7 @@ input double   EngulfBodyATR_Min   = 0.15;         // Min engulfing body (xATR)
 
 //--- Risk Management
 
-input double   RiskPerTradePct     = 0.5;          // % risk per trade
+input double   RiskPerTradePct     = 0.25;         // % risk per trade (v2.11 trimmed: was 0.5)
 
 input double   SL_ATR_Mult         = 0.6;          // SL buffer (x ATR)
 
@@ -169,7 +183,7 @@ input int      TP_Mode             = 1;            // TP: 0=BB band, 1=ATR x mul
 
 input double   TP_ATR_Mult         = 1.5;          // TP as multiple of ATR (mode=1)
 
-input double   Min_RR              = 1.0;          // Minimum reward:risk ratio (anti-bleed: >= 1:1)
+input double   Min_RR              = 1.5;          // Minimum reward:risk ratio (v2.12 profit-first: was 1.0)
 
 
 
@@ -197,7 +211,7 @@ input double   TrailingStep_ATR    = 0.5;          // Trailing step distance (xA
 
 input bool     UseBreakEven        = true;         // Move SL to breakeven
 
-input double   BreakEven_ATR       = 1.5;          // Move SL after X*ATR profit
+input double   BreakEven_ATR       = 1.0;          // Move SL after X*ATR profit (v2.12: was 1.5, protect faster)
 
 
 
@@ -215,11 +229,11 @@ input int      MaxGlobalPositions  = 6;            // Max total open positions (
 
 input int      MaxDailyTrades      = 30;           // Max trades per day (all symbols) (was 20)
 
-input double   MaxDailyLossPct     = 5.0;          // Stop trading at this daily loss %
+input double   MaxDailyLossPct     = 2.0;          // Stop trading at this daily loss % (v2.12 profit-first: was 5.0)
 
 input int      MaxTPHits           = 5;            // Pause after X TPs hit PER SESSION
 
-input int      CooldownMin         = 0;            // Minutes after trade closes (was 15)
+input int      CooldownMin         = 15;           // Minutes after trade closes (v2.12: was 0, no revenge entries)
 
 
 
@@ -398,6 +412,22 @@ int      g_currentSession = 0;   // 0=none, 1=session1, 2=session2
 
 datetime g_lastTPReset = 0;      // When tpHits was last reset
 
+//--- Once-per-deal TP log guard (anti-log-spam: DetectTPHits runs every tick)
+ulong g_loggedTPTickets[];
+bool IsTPDealLogged(ulong ticket)
+  {
+   for(int i = ArraySize(g_loggedTPTickets) - 1; i >= 0; i--)
+      if(g_loggedTPTickets[i] == ticket) return true;
+   return false;
+  }
+void MarkTPDealLogged(ulong ticket)
+  {
+   int n = ArraySize(g_loggedTPTickets);
+   ArrayResize(g_loggedTPTickets, n + 1);
+   g_loggedTPTickets[n] = ticket;
+  }
+void ClearLoggedTPDeals() { ArrayResize(g_loggedTPTickets, 0); }
+
 int      g_logFile = -1;
 
 int      g_heartbeatCount = 0;
@@ -528,6 +558,48 @@ void ReleaseHandles(SymbolState &st)
 
 //+------------------------------------------------------------------+
 
+//| v2.11: symbol self-detection — resolve exact/+-suffix, skip dead  |
+
+bool PAIR_IsTradable(string s)
+{
+   ResetLastError();
+   long mode = SymbolInfoInteger(s, SYMBOL_TRADE_MODE);
+   if(GetLastError() != 0) return false;
+   if(mode == SYMBOL_TRADE_MODE_DISABLED || mode == SYMBOL_TRADE_MODE_CLOSEONLY) return false;
+   return true;
+}
+
+string ResolveTradeSymbol(string sym)
+{
+   StringTrimLeft(sym);
+   StringTrimRight(sym);
+   if(PAIR_IsTradable(sym)) { SymbolSelect(sym, true); return sym; }
+   bool hasPlus = (StringLen(sym) > 0 && StringSubstr(sym, StringLen(sym) - 1, 1) == "+");
+   if(!hasPlus)
+   {
+      string alt = sym + "+";
+      if(PAIR_IsTradable(alt))
+      {
+         SymbolSelect(alt, true);
+         Print("FXPair: resolved '", sym, "' -> '", alt, "'");
+         return alt;
+      }
+   }
+   else
+   {
+      string bare = StringSubstr(sym, 0, StringLen(sym) - 1);
+      if(PAIR_IsTradable(bare))
+      {
+         SymbolSelect(bare, true);
+         Print("FXPair: resolved '", sym, "' -> '", bare, "'");
+         return bare;
+      }
+   }
+   return "";
+}
+
+//+------------------------------------------------------------------+
+
 //| Expert initialization                                              |
 
 //+------------------------------------------------------------------+
@@ -536,7 +608,7 @@ int OnInit()
 
 {
 
-   Comment("FXPair EA v2.0\nMulti-Symbol Confluence Day Trader");
+   Comment("FXPair EA v2.12\nMulti-Symbol Confluence Day Trader");
 
    g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
@@ -554,15 +626,50 @@ int OnInit()
 
    g_lastTPReset = g_eaStartTime;   // don't count pre-bot history as TP hits (anti-lockout)
 
+   ClearLoggedTPDeals();   // (re-)init starts with an empty logged-TP set
 
 
-   //--- Parse symbols
+
+   //--- v2.10: remote symbol override (MQL5\Files\FXPair_Symbols.txt, one line, comma-sep)
+   string effSymbols = SymbolList;
+   int ovh = FileOpen("FXPair_Symbols.txt", FILE_READ|FILE_TXT|FILE_ANSI);
+   if(ovh != INVALID_HANDLE)
+   {
+      string ovline = FileReadString(ovh);
+      FileClose(ovh);
+      StringTrimLeft(ovline);
+      StringTrimRight(ovline);
+      if(StringLen(ovline) > 0)
+      {
+         effSymbols = ovline;
+         Print("FXPair: symbol override from file: ", effSymbols);
+      }
+   }
+
+   //--- v2.10: single-instance guard (terminal-global heartbeat, 300s stale = dead)
+   string gvHB = "FXPair_HB_" + IntegerToString((int)MagicNumber);
+   string gvOwner = "FXPair_Owner_" + IntegerToString((int)MagicNumber);
+   if(GlobalVariableCheck(gvHB) && GlobalVariableCheck(gvOwner))
+   {
+      datetime lastHB = (datetime)GlobalVariableGet(gvHB);
+      long ownerChart = (long)GlobalVariableGet(gvOwner);
+      if(ownerChart != ChartID() && TimeCurrent() - lastHB < 300)
+      {
+         Print("FXPair: another instance already owns magic ", MagicNumber,
+               " (chart ", ownerChart, ") — this copy stays idle.");
+         return INIT_FAILED;
+      }
+   }
+   GlobalVariableSet(gvHB, (double)TimeCurrent());
+   GlobalVariableSet(gvOwner, (double)ChartID());
+
+   //--- Parse symbols (+ v2.11 self-detection: resolve +-suffix, drop dead names)
 
    string parts[];
 
-   g_symbolCount = StringSplit(SymbolList, ',', parts);
+   int nRaw = StringSplit(effSymbols, ',', parts);
 
-   if(g_symbolCount <= 0)
+   if(nRaw <= 0)
 
    {
 
@@ -571,6 +678,34 @@ int OnInit()
       return INIT_FAILED;
 
    }
+
+   int nOk = 0;
+   for(int r = 0; r < nRaw; r++)
+   {
+      string rsym = ResolveTradeSymbol(parts[r]);
+      if(rsym == "")
+         Print("WARNING: skipping symbol '", parts[r], "' — not found or not tradable on this account");
+      else
+      {
+         long okSp = SymbolInfoInteger(rsym, SYMBOL_SPREAD);
+         long okSl = SymbolInfoInteger(rsym, SYMBOL_TRADE_STOPS_LEVEL);
+         Print("FXPair: symbol OK: ", rsym, " spread=", okSp, "pts stops=", okSl, "pts");
+         parts[nOk] = rsym;
+         nOk++;
+      }
+   }
+
+   if(nOk <= 0)
+
+   {
+
+      Print("ERROR: No tradable symbols resolved");
+
+      return INIT_FAILED;
+
+   }
+
+   g_symbolCount = nOk;
 
 
 
@@ -584,21 +719,7 @@ int OnInit()
 
       string sym = parts[i];
 
-      StringTrimLeft(sym);
-
-      StringTrimRight(sym);
-
       g_states[i].name = sym;
-
-
-
-      if(!SymbolSelect(sym, true))
-
-      {
-
-         Print("WARNING: Cannot select symbol ", sym, " — it may not be available");
-
-      }
 
 
 
@@ -693,7 +814,7 @@ int OnInit()
 
    Print("================================================================");
 
-   Print("FXPair EA v2.0 initialized (", g_symbolCount, " symbols)");
+   Print("FXPair EA v2.12 initialized (", g_symbolCount, " symbols)");
 
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
@@ -701,7 +822,7 @@ int OnInit()
 
    Print("  Balance: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2));
 
-   Print("  Symbols: ", SymbolList);
+   Print("  Symbols: ", effSymbols);
 
    Print("  TF: M5 entry / M15 structure");
 
@@ -751,9 +872,137 @@ void OnDeinit(const int reason)
 
    if(g_logFile != INVALID_HANDLE) FileClose(g_logFile);
 
+   //--- v2.10: release single-instance claim if we own it
+   string gvHBD = "FXPair_HB_" + IntegerToString((int)MagicNumber);
+   string gvOwnerD = "FXPair_Owner_" + IntegerToString((int)MagicNumber);
+   if(GlobalVariableCheck(gvOwnerD) && (long)GlobalVariableGet(gvOwnerD) == ChartID())
+   {
+      GlobalVariableDel(gvHBD);
+      GlobalVariableDel(gvOwnerD);
+   }
+
 }
 
 
+
+//+------------------------------------------------------------------+
+
+//| v2.12 smart-trading helpers (pair sessions, movement, news, holiday)
+
+//+------------------------------------------------------------------+
+bool InHourWindow(int h, int s, int e)
+{
+   if(s <= e) return (h >= s && h < e);
+   return (h >= s || h < e);   // overnight wrap
+}
+
+bool IsPairInSession(string sym)
+{
+   string u = sym;
+   StringToUpper(u);
+   bool asian = (StringFind(u, "JPY") >= 0 || StringFind(u, "AUD") >= 0 || StringFind(u, "NZD") >= 0);
+   int h = PAIR_PHHour();
+   if(asian) return InHourWindow(h, Asia_SessionStart, Asia_SessionEnd);
+   return InHourWindow(h, EU_SessionStart, EU_SessionEnd);
+}
+
+bool HasMovement(string sym)
+{
+   double hi = iHigh(sym, TF_Structure, 1);
+   double lo = iLow(sym, TF_Structure, 1);
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(hi <= 0 || lo <= 0 || pt <= 0) return false;
+   return ((hi - lo) / pt >= (double)MinMovePoints);
+}
+
+void PAIR_PHDate(int &Y, int &M, int &D)
+{
+   MqlDateTime d;
+   TimeToStruct(TimeGMT() + 8 * 3600, d);
+   Y = d.year; M = d.mon; D = d.day;
+}
+
+int PAIR_PHMinutes()
+{
+   MqlDateTime d;
+   TimeToStruct(TimeGMT() + 8 * 3600, d);
+   return d.hour * 60 + d.min;
+}
+
+//--- news/holiday file cache ("YYYY.MM.DD HH:MM-HH:MM CCY" + "HOLIDAY:YYYY.MM.DD")
+string g_newsDate[]; int g_newsStartMin[]; int g_newsEndMin[]; string g_newsCcy[];
+string g_holiDates[]; datetime g_newsLoaded = 0;
+
+void ReloadNewsFile()
+{
+   ArrayResize(g_newsDate, 0); ArrayResize(g_newsStartMin, 0);
+   ArrayResize(g_newsEndMin, 0); ArrayResize(g_newsCcy, 0);
+   ArrayResize(g_holiDates, 0);
+   g_newsLoaded = TimeCurrent();
+   int h = FileOpen("FXPair_NewsBlackout.txt", FILE_READ | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+   while(!FileIsEnding(h))
+   {
+      string line = FileReadString(h);
+      StringTrimLeft(line); StringTrimRight(line);
+      if(StringLen(line) < 10 || StringGetCharacter(line, 0) == '#') continue;
+      if(StringFind(line, "HOLIDAY:") == 0)
+      {
+         int n = ArraySize(g_holiDates);
+         ArrayResize(g_holiDates, n + 1);
+         g_holiDates[n] = StringSubstr(line, 8, 10);
+         continue;
+      }
+      string p[];
+      if(StringSplit(line, ' ', p) < 3) continue;
+      string t[];
+      if(StringSplit(p[1], '-', t) < 2) continue;
+      int n2 = ArraySize(g_newsDate);
+      ArrayResize(g_newsDate, n2 + 1); ArrayResize(g_newsStartMin, n2 + 1);
+      ArrayResize(g_newsEndMin, n2 + 1); ArrayResize(g_newsCcy, n2 + 1);
+      g_newsDate[n2] = p[0];
+      g_newsStartMin[n2] = (int)StringToInteger(StringSubstr(t[0], 0, 2)) * 60 + (int)StringToInteger(StringSubstr(t[0], 3, 2));
+      g_newsEndMin[n2] = (int)StringToInteger(StringSubstr(t[1], 0, 2)) * 60 + (int)StringToInteger(StringSubstr(t[1], 3, 2));
+      string cc = p[2]; StringToUpper(cc);
+      g_newsCcy[n2] = cc;
+   }
+   FileClose(h);
+}
+
+string PAIR_TodayPH()
+{
+   int Y, M, D;
+   PAIR_PHDate(Y, M, D);
+   return StringFormat("%04d.%02d.%02d", Y, M, D);
+}
+
+bool IsHoliday()
+{
+   int Y, M, D;
+   PAIR_PHDate(Y, M, D);
+   if((M == 12 && D == 25) || (M == 1 && D == 1)) return true;
+   string today = PAIR_TodayPH();
+   for(int i = 0; i < ArraySize(g_holiDates); i++)
+      if(g_holiDates[i] == today) return true;
+   return false;
+}
+
+bool IsNewsBlocked(string sym)
+{
+   if(TimeCurrent() - g_newsLoaded >= 3600) ReloadNewsFile();
+   if(ArraySize(g_newsDate) == 0) return false;
+   string u = sym;
+   StringToUpper(u);
+   string today = PAIR_TodayPH();
+   int nowMin = PAIR_PHMinutes();
+   for(int i = 0; i < ArraySize(g_newsDate); i++)
+   {
+      if(g_newsDate[i] != today) continue;
+      if(nowMin < g_newsStartMin[i] || nowMin >= g_newsEndMin[i]) continue;
+      if(g_newsCcy[i] == "ALL" || StringFind(u, g_newsCcy[i]) >= 0) return true;
+   }
+   return false;
+}
 
 //+------------------------------------------------------------------+
 
@@ -767,21 +1016,26 @@ void OnTick()
 
    //--- Daily reset + TP detection
 
+   //--- v2.10: heartbeat our single-instance claim (60s throttle)
+   static datetime s_lastHBWrite = 0;
+   if(TimeCurrent() - s_lastHBWrite >= 60)
+   {
+      s_lastHBWrite = TimeCurrent();
+      GlobalVariableSet("FXPair_HB_" + IntegerToString((int)MagicNumber), (double)TimeCurrent());
+   }
+
    CheckDailyReset();
 
    DetectTPHits();
 
 
 
-   //--- Heartbeat: log status every 12 bars (~1 hour on M5)
+   //--- Heartbeat: log status once per hour (v2.10: was per-12-ticks = log spam)
 
-   g_heartbeatCount++;
-
-   if(g_heartbeatCount >= 12)
-
+   static datetime s_lastStatusLog = 0;
+   if(TimeCurrent() - s_lastStatusLog >= 3600)
    {
-
-      g_heartbeatCount = 0;
+      s_lastStatusLog = TimeCurrent();
 
       double bal = AccountInfoDouble(ACCOUNT_BALANCE);
 
@@ -804,6 +1058,10 @@ void OnTick()
    }
 
 
+
+   //--- v2.12 best-pair selection: collect top scorer, execute once after loop
+   int bestS = -1, bestDir = 0, bestBuy = 0, bestSell = 0, bestMarg = -1, bestWin = 0;
+   double bestAtr = 0;
 
    for(int s = 0; s < g_symbolCount; s++)
 
@@ -876,6 +1134,34 @@ void OnTick()
       double sp = (ask - bid) / point;
 
       if(sp > MaxSpreadPts) continue;
+
+
+
+      //--- v2.12 smart gates: pair session window, movement, holiday, news
+
+      if(UsePairSessions && !IsPairInSession(st.name))
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: outside pair session (PH ", PAIR_PHHour(), ":00)");
+         continue;
+      }
+
+      if(UseVolatilityFilter && !HasMovement(st.name))
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: no movement (flat market)");
+         continue;
+      }
+
+      if(UseHolidayFilter && IsHoliday())
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: holiday");
+         continue;
+      }
+
+      if(UseNewsFilter && IsNewsBlocked(st.name))
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: news blackout");
+         continue;
+      }
 
 
 
@@ -985,27 +1271,27 @@ void OnTick()
 
 
 
-      //--- Entry decision
+      //--- Entry decision (v2.11: winner must clear min AND beat loser by MinConfluenceGap)
 
       int direction = 0; // 0=skip, 1=BUY, -1=SELL
 
-      if(confBuy >= ConfluenceMinScore && confBuy > confSell)
+      if(confBuy >= ConfluenceMinScore && confBuy - confSell >= MinConfluenceGap)
 
       {
 
-         direction = 1; // BUY wins
+         direction = 1; // BUY wins clearly
 
       }
 
-      else if(confSell >= ConfluenceMinScore && confSell > confBuy)
+      else if(confSell >= ConfluenceMinScore && confSell - confBuy >= MinConfluenceGap)
 
       {
 
-         direction = -1; // SELL wins
+         direction = -1; // SELL wins clearly
 
       }
 
-      else if(confBuy >= ConfluenceMinScore && confSell >= ConfluenceMinScore && confBuy == confSell)
+      else if(MinConfluenceGap <= 0 && confBuy >= ConfluenceMinScore && confSell >= ConfluenceMinScore && confBuy == confSell)
 
       {
 
@@ -1029,6 +1315,9 @@ void OnTick()
 
       {
 
+         int winConf = (direction == 1 ? confBuy : confSell);
+         int margConf = (direction == 1 ? confBuy - confSell : confSell - confBuy);
+
          if(direction == 1)
 
          {
@@ -1037,7 +1326,7 @@ void OnTick()
 
                   " (tie=", confBuy == confSell ? "trend↑" : "dominant", ")");
 
-            if(CheckBuyEntry(st, confBuy, confSell, atrM5))
+            if(!TradeBestOnly && CheckBuyEntry(st, confBuy, confSell, atrM5))
 
             {
 
@@ -1055,7 +1344,7 @@ void OnTick()
 
                   " (tie=", confSell == confBuy ? "trend↓" : "dominant", ")");
 
-            if(CheckSellEntry(st, confBuy, confSell, atrM5))
+            if(!TradeBestOnly && CheckSellEntry(st, confBuy, confSell, atrM5))
 
             {
 
@@ -1063,6 +1352,13 @@ void OnTick()
 
             }
 
+         }
+
+         if(TradeBestOnly && (margConf > bestMarg || (margConf == bestMarg && winConf > bestWin)))
+         {
+            bestS = s; bestDir = direction;
+            bestBuy = confBuy; bestSell = confSell;
+            bestMarg = margConf; bestWin = winConf; bestAtr = atrM5;
          }
 
       }
@@ -1083,6 +1379,23 @@ void OnTick()
 
       g_states[s] = st;
 
+   }
+
+   //--- v2.12 best-only execution: trade the single top-scoring pair
+   if(TradeBestOnly && bestS >= 0 && !g_tradingPaused && !g_tpPause && g_tradesToday < MaxDailyTrades)
+   {
+      SymbolState bst = g_states[bestS];
+      Print("FXPair BEST PICK: ", bst.name, " ", (bestDir == 1 ? "BUY" : "SELL"),
+            " margin=", bestMarg, " conf=", bestWin);
+      if(bestDir == 1)
+      {
+         if(CheckBuyEntry(bst, bestBuy, bestSell, bestAtr)) g_tradesToday++;
+      }
+      else
+      {
+         if(CheckSellEntry(bst, bestBuy, bestSell, bestAtr)) g_tradesToday++;
+      }
+      g_states[bestS] = bst;
    }
 
 }
@@ -3083,6 +3396,8 @@ void CheckDailyReset()
 
       g_lastTPReset = dayStart;
 
+      ClearLoggedTPDeals();   // fresh day -> fresh TP-deal set (counter reset)
+
    }
 
 
@@ -3102,6 +3417,8 @@ void CheckDailyReset()
       g_tpPause = false;
 
       g_lastTPReset = TimeCurrent();
+
+      ClearLoggedTPDeals();   // fresh session -> fresh TP-deal set (counter reset)
 
       if(newSession > 0)
 
@@ -3131,6 +3448,19 @@ void CheckDailyReset()
 
       }
 
+      //--- v2.12 profit-first: lock the day's gains, stop giving back
+      double profPct = (currBalance - g_dailyStartBalance) / g_dailyStartBalance * 100.0;
+
+      if(profPct >= DailyProfitLockPct)
+
+      {
+
+         g_tradingPaused = true;
+
+         Print("Daily profit lock (+", DoubleToString(profPct, 1), "%) reached. Paused till tomorrow.");
+
+      }
+
    }
 
 }
@@ -3149,6 +3479,7 @@ void DetectTPHits()
 
    CheckDailyReset();
 
+   if(g_tpPause) return;   // paused: stop re-scanning history every tick
 
 
    // Only count deals from current session start
@@ -3197,15 +3528,8 @@ void DetectTPHits()
 
       {
 
-         static datetime lastTPDealTime = 0;
-
-         static ulong lastTPDealTicket = 0;
-
-         if(dealTime == lastTPDealTime && ticket == lastTPDealTicket) continue;
-
-         lastTPDealTime = dealTime;
-
-         lastTPDealTicket = ticket;
+         if(IsTPDealLogged(ticket)) continue;   // each deal counted + logged once
+         MarkTPDealLogged(ticket);
 
 
 

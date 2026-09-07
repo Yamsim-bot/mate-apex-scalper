@@ -13,11 +13,11 @@
 //|  7. Auto-detect broker fill mode (was hardcoded IOC)              |
 //+------------------------------------------------------------------+
 #property copyright "FXRE Replication Project"
-#property version   "2.00"
-#property description "FXRE Hybrid v2.0: AGV S&D zones + tightened risk + partial TP"
+#property version   "2.10"
+#property description "FXRE Hybrid v2.01 Conservative: trend+reject filters, 0.8ATR proximity, RR>=1.5 net, no trail-into-loss"
 
 //--- Scalp Mode (v3.0)
-input bool     ScalpMode           = true;       // Enable scalp mode (aggressive entries)
+input bool     ScalpMode           = false;      // Enable scalp mode (aggressive entries)
 input double   Scalp_BreakoutATR   = 0.20;       // Min breakout range (xATR)
 input int      Scalp_BreakoutBars  = 2;          // Lookback bars for breakout
 
@@ -29,20 +29,20 @@ input int      Swing_MaxAge          = 240;   // Max zone age in M15 candles (wa
 input double   Swing_MinStrength     = 0.3;   // Minimum zone strength (1-5, was 1.5)
 
 //--- Entry Confirmation
-input bool     RequireZoneReject     = false;
+input bool     RequireZoneReject     = true;
 input double   MinRejectWickATR      = 0.08;  // Min rejection wick (xATR, was 0.10)
-input double   ZoneProximityATR      = 2.0;   // Max distance from zone (xATR, was 0.5)
+input double   ZoneProximityATR      = 0.8;   // Max distance from zone (xATR, was 0.5)
 
 //--- Trend Filter (optional — only trade with M15 trend)
-input bool     UseTrendFilter        = false;
+input bool     UseTrendFilter        = true;
 input int      TrendFilterMAPeriod   = 200;   // EMA for trend direction
 
 //--- Risk Management
 input double   RiskPerTradePct       = 0.5;   // % risk per trade (was 1.0)
 input double   SL_BufferATR          = 0.3;   // SL behind zone (x ATR, was 1.2)
-input double   TP_Multiplier         = 1.5;   // TP = zone_width * mult (was 2.0)
+input double   TP_Multiplier         = 2.0;   // TP = zone_width * mult (was 2.0)
 input double   TP_MinATR             = 0.6;   // Min TP (x ATR, was 0.8)
-input double   Min_RR                = 1.0;   // Minimum reward:risk (anti-bleed: >= 1:1, TP is stretched to hold)
+input double   Min_RR                = 1.5;   // Minimum reward:risk (anti-bleed: >= 1:1, TP is stretched to hold)
 
 //--- Partial Take-Profit
 input bool     UsePartialTP          = true;   // Enable partial take profit
@@ -63,28 +63,35 @@ input double   FixedLotPer2k         = 0.01;   // Fallback lot per $2k
 
 //--- Safety Limits
 input int      MaxPositions          = 2;      // Max positions
-input int      MaxDailyTrades        = 15;     // Max trades per day (10-15 for scalp)
-input double   MaxDailyLossPct       = 3.0;    // Stop trading at this loss %
+input int      MaxDailyTrades        = 8;      // Max trades per day (10-15 for scalp)
+input double   MaxDailyLossPct       = 2.0;    // Stop trading at this loss % (profit-first: was 3.0)
 input int      MaxTPHits             = 5;      // Pause after X TPs hit PER SESSION
 input bool     ResetOnNewSession    = true;   // Reset TP counter on new session
 
 //--- Trading Session (PH Time = UTC+8)
-input bool     UseSessionFilter      = false;
-// Window 1: London session (15:00-00:00 PH = 07:00-16:00 GMT)
-input int      SessionStartHour      = 15;     // London open (PH time)
+input bool     UseSessionFilter      = true;
+// Window 1: 17:00-20:00 PH = 09:00-12:00 GMT (evidence green pocket, 30d magic 20241201)
+input int      SessionStartHour      = 17;
 input int      SessionStartMin       = 0;
-input int      SessionEndHour        = 0;      // Midnight PH (end of London)
+input int      SessionEndHour        = 20;
 input int      SessionEndMin         = 0;
-// Window 2: NY session (20:00-05:00 PH = 12:00-21:00 GMT)
-input int      Session2StartHour     = 20;     // NY open (PH time)
+// Window 2: disabled via duplicate of W1 (EA OR-logic: 0-0 = always-ON)
+input int      Session2StartHour     = 17;
 input int      Session2StartMin      = 0;
-input int      Session2EndHour       = 5;      // NY close (PH time)
+input int      Session2EndHour       = 20;
 input int      Session2EndMin        = 0;
 input bool     TradeMonday           = true;
 input bool     TradeTuesday          = true;
 input bool     TradeWednesday        = true;
 input bool     TradeThursday         = true;
 input bool     TradeFriday           = true;
+
+//--- SaneTrade shared guards (movement, news, holiday, profit lock)
+input bool     SaneMovement        = true;       // Skip dead/flat market
+input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
+input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
+input double   SaneProfitLockPct   = 1.5;        // Halt new entries after +X% day
 
 //--- General
 input ulong    MagicNumber           = 20241201;
@@ -103,8 +110,9 @@ datetime g_lastScanTime = 0;
 ENUM_ORDER_TYPE_FILLING g_fillMode = ORDER_FILLING_IOC;
 int    g_heartbeatCount = 0;
 
-#include "..\Include\FXRE_SwingSD.mqh"
-#include "..\Include\FXRE_SessionFilter.mqh"
+#include "FXRE_SwingSD.mqh"
+#include "FXRE_SessionFilter.mqh"
+#include "SaneTrade.mqh"   // shared guards: movement, news, holiday, day locks
 
 //+------------------------------------------------------------------+
 //| Auto-detect fill mode                                             |
@@ -190,6 +198,26 @@ Hybrid_DailyStats g_hybridDaily;
 datetime g_hybridResetDay = 0;
 datetime g_eaStartTime      = 0;   // Attach time — pre-bot history must not count as TP hits
 
+//--- Once-per-deal TP log guard (log-spam fix): tickets already counted+logged.
+//    DetectTPHits() runs every tick; the ticket set is authoritative dedup so a
+//    historical TP deal can never be re-counted/re-Printed (same-second deals
+//    share DEAL_TIME, so a time watermark alone is not sufficient).
+//    Cleared whenever the TP counter resets (new day / new session).
+ulong g_loggedTPTickets[];
+bool IsTPDealLogged(ulong ticket)
+{
+   for(int i = ArraySize(g_loggedTPTickets) - 1; i >= 0; i--)
+      if(g_loggedTPTickets[i] == ticket) return true;
+   return false;
+}
+void MarkTPDealLogged(ulong ticket)
+{
+   int n = ArraySize(g_loggedTPTickets);
+   ArrayResize(g_loggedTPTickets, n + 1);
+   g_loggedTPTickets[n] = ticket;
+}
+void ClearLoggedTPDeals() { ArrayResize(g_loggedTPTickets, 0); }
+
 //+------------------------------------------------------------------+
 //| Detect which session we're currently in                           |
 //+------------------------------------------------------------------+
@@ -227,6 +255,7 @@ void ResetHybridDaily()
       g_hybridDaily.tradingStopped = false;
       g_hybridDaily.lastTPReset = today; // Start counting from midnight
       g_hybridResetDay = today;
+      ClearLoggedTPDeals();   // fresh day -> fresh TP-deal set (counter reset)
    }
 
    //--- Detect session change -> reset TP counter for new session
@@ -237,6 +266,9 @@ void ResetHybridDaily()
       g_hybridDaily.tpHits = 0;
       g_hybridDaily.tpPause = false;
       g_hybridDaily.lastTPReset = TimeCurrent();
+      g_hybridDaily.lastTPDealTime = 0;    // watermark belongs to old session
+      g_hybridDaily.lastTPDealTicket = 0;
+      ClearLoggedTPDeals();   // fresh session -> fresh TP-deal set (counter reset)
       if(newSession > 0)
          Print("SESSION CHANGE -> ", (newSession == 1 ? "LONDON" : "NY"),
                " | TP counter reset. Fresh ", MaxTPHits, " TPs available.");
@@ -324,9 +356,12 @@ void DetectTPHits()
       if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
       if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != (long)MagicNumber) continue;
 
-      // Skip deals at or before the boundary we already counted
-      datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
-      if(dealTime <= scanFrom) continue;
+       // Skip deals strictly before the boundary we already counted.
+       // (Same-second deals use `<`, not `<=`: the ticket set below is the
+       // authoritative dedup, so a TP sharing DEAL_TIME with the watermark
+       // but arriving in history a tick later is still counted — once.)
+       datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+       if(dealTime < scanFrom) continue;
 
    // Skip deals before this EA instance started (anti-lockout: an attach
    // must not count today's earlier TP closes and pause instantly)
@@ -335,6 +370,12 @@ void DetectTPHits()
    // Check if this was a TP close (reason = DEAL_REASON_TP)
    long reason = HistoryDealGetInteger(ticket, DEAL_REASON);
    if(reason != DEAL_REASON_TP) continue;
+
+      // Once-per-deal guard (authoritative): never re-count/re-log a ticket
+      // already counted on a previous tick, even if it shares DEAL_TIME with
+      // another deal or history ordering shifts the time watermark.
+      if(IsTPDealLogged(ticket)) continue;
+      MarkTPDealLogged(ticket);
 
       g_hybridDaily.tpHits++;
       g_hybridDaily.lastTPDealTime = dealTime;
@@ -435,6 +476,35 @@ double CalcRiskLot(double slDistancePts)
 
    lot = MathMin(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
    return MathMax(lot, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+}
+
+//+------------------------------------------------------------------+
+//| Anti-bleed v2.01: net RR guard (spread+commission via tick value) |
+//+------------------------------------------------------------------+
+double EstimateRoundTripCost(double lot)
+{
+   long spreadPts = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0 || lot <= 0) return 0;
+   double spreadPrice = (double)spreadPts * _Point;
+   double spreadCost = (spreadPrice / tickSize) * tickValue * lot;
+   double commissionEst = spreadCost * 0.5;
+   return spreadCost + commissionEst;
+}
+bool PassesNetRRFilter(double tpDistPrice, double slDistPrice, double lot)
+{
+   if(tpDistPrice <= 0 || slDistPrice <= 0 || lot <= 0) return false;
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0) return (tpDistPrice / slDistPrice >= Min_RR);
+   double grossWin  = (tpDistPrice / tickSize) * tickValue * lot;
+   double grossLoss = (slDistPrice / tickSize) * tickValue * lot;
+   double cost = EstimateRoundTripCost(lot);
+   double netWin  = grossWin - cost;
+   double netLoss = grossLoss + cost;
+   if(netLoss <= 0 || netWin <= 0) return false;
+   return ((netWin / netLoss) >= Min_RR);
 }
 
 //+------------------------------------------------------------------+
@@ -632,7 +702,7 @@ void ManageOpenPositions()
             if(profitDist >= trailStart)
             {
                double newSL = NormalizeDouble(currentPrice - trailStep, digits);
-               if(newSL > sl + point)
+               if(newSL > sl + point && newSL >= entry)
                   ModifySL(ticket, newSL);
             }
          }
@@ -642,7 +712,7 @@ void ManageOpenPositions()
             if(profitDist >= trailStart)
             {
                double newSL = NormalizeDouble(currentPrice + trailStep, digits);
-               if(newSL < sl - point || sl == 0)
+               if((newSL < sl - point || sl == 0) && newSL <= entry)
                   ModifySL(ticket, newSL);
             }
          }
@@ -686,6 +756,7 @@ int OnInit()
    if(zones > 0) PrintSwingZones();
 
    ResetHybridDaily();
+   ClearLoggedTPDeals();   // (re-)init starts with an empty logged-TP set
    Print("  Session: ", HybridSessionStatus());
    Print("================================================================");
 
@@ -733,6 +804,11 @@ void CheckHybridEntry()
          {
             double tp = NormalizeDouble(ask + slDistPts * 1.5 * _Point, digits);
             double lot = CalcRiskLot(slDistPts);
+            if(!PassesNetRRFilter((tp - ask), (ask - sl), lot))
+            {
+               if(DebugMode) Print("SKIP SCALP BUY: net RR < Min_RR=", DoubleToString(Min_RR, 2));
+               return;
+            }
             if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_BUY, lot, ask, sl, tp,
                CommentPrefix + "_SCALP_BUY"))
             {
@@ -759,6 +835,11 @@ void CheckHybridEntry()
          {
             double tp = NormalizeDouble(bid - slDistPts * 1.5 * _Point, digits);
             double lot = CalcRiskLot(slDistPts);
+            if(!PassesNetRRFilter((bid - tp), (sl - bid), lot))
+            {
+               if(DebugMode) Print("SKIP SCALP SELL: net RR < Min_RR=", DoubleToString(Min_RR, 2));
+               return;
+            }
             if(lot >= 0.01 && OpenOrderHybrid(ORDER_TYPE_SELL, lot, bid, sl, tp,
                CommentPrefix + "_SCALP_SELL"))
             {
@@ -904,6 +985,12 @@ void CheckHybridEntry()
 
       double lot = CalcRiskLot(slDistPts);
 
+      if(!PassesNetRRFilter(tpDist, (bid - sl), lot))
+      {
+         if(DebugMode) Print("SKIP BUY: net RR < Min_RR=", DoubleToString(Min_RR, 2));
+         return;
+      }
+
       if(OpenOrderHybrid(ORDER_TYPE_BUY, lot, ask, sl, tp,
          CommentPrefix + "_BUY_Z" + DoubleToString(nearDemand.strength, 1)))
       {
@@ -944,6 +1031,12 @@ void CheckHybridEntry()
       }
 
       double lot = CalcRiskLot(slDistPts);
+
+      if(!PassesNetRRFilter(tpDist, (sl - bid), lot))
+      {
+         if(DebugMode) Print("SKIP SELL: net RR < Min_RR=", DoubleToString(Min_RR, 2));
+         return;
+      }
 
       if(OpenOrderHybrid(ORDER_TYPE_SELL, lot, bid, sl, tp,
          CommentPrefix + "_SELL_Z" + DoubleToString(nearSupply.strength, 1)))
@@ -1056,6 +1149,24 @@ void OnTick()
                " dd=", DoubleToString((g_hybridDaily.startingBalance - AccountInfoDouble(ACCOUNT_EQUITY))
                                       / MathMax(g_hybridDaily.startingBalance, 1.0) * 100.0, 1), "%");
       }
+      UpdateComment();
+      return;
+   }
+
+   //--- SaneTrade guards: holiday, news blackout, dead market
+   if(SaneHoliday && SANE_IsHoliday())
+   { UpdateComment(); return; }
+   if(SaneNews && SANE_IsNewsBlocked(_Symbol))
+   { UpdateComment(); return; }
+   if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts))
+   { UpdateComment(); return; }
+
+   //--- Profit lock: halt new entries after locking gains
+   double dayUp = (AccountInfoDouble(ACCOUNT_EQUITY) - g_hybridDaily.startingBalance)
+                  / MathMax(g_hybridDaily.startingBalance, 1.0) * 100.0;
+   if(dayUp >= SaneProfitLockPct)
+   {
+      Print("LOCKED: Daily profit +", DoubleToString(dayUp, 2), "% reached. No new entries today.");
       UpdateComment();
       return;
    }

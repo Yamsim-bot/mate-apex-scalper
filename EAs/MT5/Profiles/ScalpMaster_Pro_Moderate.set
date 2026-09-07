@@ -1,0 +1,23 @@
+; ScalpMaster_Pro Moderate — RiskPerTradePct=0.5, MinRR=1.2, EA defaults
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in GMT (=UTC), EA defaults:
+; London 07-10 GMT / NY 13-16 GMT
+; NOTE: EA has NO trend-filter bool and NO ScalpMode bool.
+RiskPerTradePct=0.5
+MaxDailyLossPct=2.0
+MaxPositions=1
+MaxTradesPerDay=5
+SL_ATR=1.2
+TP_ATR=2.0
+MinRR=1.2
+UseBE=true
+BE_TriggerATR=0.8
+UseTrail=true
+TrailStartATR=1.0
+TrailStepATR=0.3
+EnableDeltaBubble=true
+LondonStart=7
+LondonEnd=10
+NYStart=13
+NYEnd=16
+MagicNumber=334455
+CommentPrefix=SCALP

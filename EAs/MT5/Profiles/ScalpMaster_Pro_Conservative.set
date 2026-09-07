@@ -1,0 +1,23 @@
+; ScalpMaster_Pro Conservative — RiskPerTradePct=0.25, MinRR=1.5, tight London/NY core
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in GMT (=UTC):
+; London 08-10 GMT (tight core of 07-16 UTC) / NY 14-16 GMT (core of 16-21 UTC)
+; NOTE: EA has NO trend-filter bool and NO ScalpMode bool — lowest MaxTradesPerDay is the throttle.
+RiskPerTradePct=0.25
+MaxDailyLossPct=1.0
+MaxPositions=1
+MaxTradesPerDay=2
+SL_ATR=1.2
+TP_ATR=2.0
+MinRR=1.5
+UseBE=true
+BE_TriggerATR=0.8
+UseTrail=true
+TrailStartATR=1.0
+TrailStepATR=0.3
+EnableDeltaBubble=true
+LondonStart=8
+LondonEnd=10
+NYStart=14
+NYEnd=16
+MagicNumber=334455
+CommentPrefix=SCALP

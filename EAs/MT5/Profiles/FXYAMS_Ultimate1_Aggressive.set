@@ -1,0 +1,26 @@
+; FXYAMS_Ultimate1 Aggressive — RiskPercent=1.0, Min_RR=1.0, ScalpMode ON, TrendMode OFF, filter OFF
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in PH (UTC+8), wide (filter OFF by default):
+; London-wide 14-01 PH / NY-wide 19-06 PH (take effect if UseSessionFilter re-enabled)
+RiskPercent=1.0
+MaxDailyLossPct=7.0
+MaxPositions=3
+MaxDailyTrades=50
+MaxTPHits=12
+ResetOnNewSession=true
+Min_RR=1.0
+ScalpMode=true
+TrendMode=false
+UseSessionFilter=false
+SessionStartHour=14
+SessionStartMin=0
+SessionEndHour=1
+SessionEndMin=0
+Session2StartHour=19
+Session2StartMin=0
+Session2EndHour=6
+Session2EndMin=0
+UseTrailing=true
+UseBreakEven=true
+UsePartialTP=true
+MagicNumber=20260716
+CommentPrefix=ULTI_EA

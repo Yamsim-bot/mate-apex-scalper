@@ -10,7 +10,7 @@
 //|  - ATR-based SL + TP with break-even + trailing                  |
 //+------------------------------------------------------------------+
 #property copyright "FXRE v3.0"
-#property version   "3.20"
+#property version   "3.30"
 #property description "XAUUSD FRVP + Price Action Scalper"
 #property description "v3.20: + VP-Pro Mode (Syndicate/Shadow Intel fusion):"
 #property description "  Weekly VP POC/VAH/VAL + Hard S/D zones + Order Flow confluence"
@@ -25,6 +25,7 @@
 #include "SupportResistance.mqh"
 #include "WeeklyVolumeProfile.mqh"
 #include "FXRE_SwingSD.mqh"
+#include "SaneTrade.mqh"   // shared guards: movement, news, holiday, day locks
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
@@ -33,6 +34,11 @@
 input string   Inp_Gen            = "======== GENERAL ========";
 input double   RiskPerTradePct    = 0.5;
 input double   MaxDailyRiskPct    = 2.0;
+input double   SaneProfitLockPct   = 1.5;      // Halt new entries after +X% day (lock gains)
+input bool     SaneMovement        = true;     // Skip dead/flat market
+input int      SaneMinMovePts      = 200;      // Min M15 bar range, points ($2 on gold)
+input bool     SaneNews            = true;     // Blackout file (USD news moves gold)
+input bool     SaneHoliday         = true;     // Skip Dec 25 / Jan 1 + listed
 input double   MaxSessDDPct       = 1.5;
 input int      MaxTradesPerSess   = 5;
 input int      MaxPositions       = 1;
@@ -432,6 +438,11 @@ void CheckEntry()
    }
    if(g_stats.sessTradingStopped) return;
    if(g_stats.sessionTradeCount >= MaxTradesPerSess) return;
+
+   //--- SaneTrade guards: holiday, news blackout, dead market
+   if(SaneHoliday && SANE_IsHoliday()) return;
+   if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return;
+   if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return;
 
    //--- Need FRVP valid for entries
    if(!g_frvp.current.valid)
@@ -1459,6 +1470,12 @@ void ResetDaily()
       {
          g_stats.tradingStopped = true;
          Print("*** MAX DAILY LOSS: ", DoubleToString(ddPct, 2), "% ***");
+      }
+      double upPct = (m_account.Equity() - g_stats.startingBalance) / g_stats.startingBalance * 100.0;
+      if(upPct >= SaneProfitLockPct)
+      {
+         g_stats.tradingStopped = true;
+         Print("*** PROFIT LOCK: +", DoubleToString(upPct, 2), "% — no new entries today ***");
       }
    }
 }

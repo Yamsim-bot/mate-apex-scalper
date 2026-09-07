@@ -1,0 +1,27 @@
+; FXRE_Hybrid_EA Aggressive — RiskPerTradePct=1.0, Min_RR=1.0, ScalpMode ON, quick TP
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in PH (UTC+8), wide (filter OFF):
+; London-wide 14-01 PH / NY-wide 19-06 PH (take effect if UseSessionFilter re-enabled)
+RiskPerTradePct=1.0
+MaxDailyLossPct=5.0
+MaxPositions=3
+MaxDailyTrades=25
+MaxTPHits=8
+ResetOnNewSession=true
+Min_RR=1.0
+TP_Multiplier=1.2
+ScalpMode=true
+UseTrendFilter=false
+UseSessionFilter=false
+SessionStartHour=14
+SessionStartMin=0
+SessionEndHour=1
+SessionEndMin=0
+Session2StartHour=19
+Session2StartMin=0
+Session2EndHour=6
+Session2EndMin=0
+UsePartialTP=true
+UseTrailing=true
+UseBreakEven=true
+MagicNumber=20241201
+CommentPrefix=FXRE_HYBRID

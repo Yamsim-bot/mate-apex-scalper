@@ -1,0 +1,28 @@
+; FXPair_EA Aggressive — RiskPerTradePct=1.0, Min_RR=1.0, relaxed confluence, wide sessions
+; Scope: EURUSD+ only (SymbolList kept at default), US30 out of scope. Sessions in PH (UTC+8), wide (filter OFF):
+; London-wide 14-01 PH / NY-wide 19-06 PH (take effect if UseSessionFilter re-enabled)
+; NOTE: EA has NO MaxPositions input — uses MaxPositionsPerPair + MaxGlobalPositions. No ScalpMode input exists.
+SymbolList=EURUSD+
+RiskPerTradePct=1.0
+MaxDailyLossPct=7.0
+MaxPositionsPerPair=3
+MaxGlobalPositions=8
+MaxDailyTrades=50
+MaxTPHits=8
+Min_RR=1.0
+TP_Mode=1
+TP_ATR_Mult=1.2
+ConfluenceMinScore=1
+UseSessionFilter=false
+SessionStartHour=14
+SessionStartMin=0
+SessionEndHour=1
+SessionEndMin=0
+Session2StartHour=19
+Session2StartMin=0
+Session2EndHour=6
+Session2EndMin=0
+UseTrailing=true
+UseBreakEven=true
+MagicNumber=20260723
+CommentPrefix=PAIR_EA

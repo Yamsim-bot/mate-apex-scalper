@@ -1,0 +1,28 @@
+; FXPair_EA Conservative — RiskPerTradePct=0.25, Min_RR=1.5, strict confluence, session filter ON
+; Scope: EURUSD+ only (SymbolList kept at default), US30 out of scope. Sessions in PH (UTC+8):
+; London 07-16 UTC = 15-00 PH -> tight core 16-20 PH / NY 16-21 UTC = 00-05 PH -> tight core 00-03 PH
+; NOTE: EA has NO MaxPositions input — uses MaxPositionsPerPair + MaxGlobalPositions. No trend-filter bool — ConfluenceMinScore=3 is the strictness proxy.
+SymbolList=EURUSD+
+RiskPerTradePct=0.25
+MaxDailyLossPct=2.5
+MaxPositionsPerPair=1
+MaxGlobalPositions=2
+MaxDailyTrades=10
+MaxTPHits=2
+Min_RR=1.5
+TP_Mode=1
+TP_ATR_Mult=1.5
+ConfluenceMinScore=3
+UseSessionFilter=true
+SessionStartHour=16
+SessionStartMin=0
+SessionEndHour=20
+SessionEndMin=0
+Session2StartHour=0
+Session2StartMin=0
+Session2EndHour=3
+Session2EndMin=0
+UseTrailing=true
+UseBreakEven=true
+MagicNumber=20260723
+CommentPrefix=PAIR_EA

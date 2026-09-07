@@ -1,0 +1,33 @@
+; ScalpXAU Conservative — RiskPerTradePct=0.25, tight London/NY core, trend filters ON
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in GMT (=UTC).
+; London 08-10 GMT (tight core of 07-16 UTC) / NY 14-16 GMT (core of 16-21 UTC)
+; NOTE: ScalpXAU has NO MinRR input — RR floor is hardcoded 2.0 in code (line ~1169). No MinRR line possible.
+RiskPerTradePct=0.25
+MaxDailyRiskPct=1.0
+MaxSessDDPct=0.75
+MaxTradesPerSess=2
+MaxPositions=1
+EnableTrendFilter=true
+PA_RequireTrend=true
+EnableSR=true
+EnableAsiaVP=true
+AsiaVP_MinRangeATR=2.0
+AsiaVP_UseFlow=true
+AsiaVP_FlowWinMin=20
+EnableVPPro=false
+Asian_StartH=0
+Asian_StartM=30
+Asian_EndH=3
+Asian_EndM=30
+London_StartH=8
+London_StartM=0
+London_EndH=10
+London_EndM=0
+NY_StartH=14
+NY_StartM=0
+NY_EndH=16
+NY_EndM=0
+UseBreakEven=true
+UseTrailing=true
+MagicNumber=241107
+CommentPrefix=SCALPX_EA

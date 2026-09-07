@@ -11,7 +11,7 @@
 int PHTimeHour()
 {
    MqlDateTime dt;
-   TimeTradeServer(dt);
+   TimeGMT(dt);   // GMT-based: server offset varies (Vantage GMT+2/+3), so +8 from GMT is exact
    int phHour = dt.hour + 8;
    if(phHour >= 24) phHour -= 24;
    if(phHour < 0)   phHour += 24;
@@ -21,14 +21,14 @@ int PHTimeHour()
 int PHTimeMin()
 {
    MqlDateTime dt;
-   TimeTradeServer(dt);
+   TimeGMT(dt);
    return dt.min;
 }
 
 int PHTimeDayOfWeek()
 {
    MqlDateTime dt;
-   TimeTradeServer(dt);
+   TimeGMT(dt);
    int phHour = dt.hour + 8;
    int phDow  = dt.day_of_week;
    if(phHour >= 24) { phDow++; if(phDow > 6) phDow = 0; }

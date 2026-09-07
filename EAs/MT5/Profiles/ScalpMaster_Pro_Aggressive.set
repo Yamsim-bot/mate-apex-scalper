@@ -1,0 +1,23 @@
+; ScalpMaster_Pro Aggressive — RiskPerTradePct=1.0, MinRR=1.0, wide sessions, quicker TP (scalp proxy)
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in GMT (=UTC):
+; London 07-11 GMT / NY 13-17 GMT (wide). No ScalpMode input exists — TP_ATR 2.0->1.5 is the scalp proxy.
+; NOTE: EA has NO trend-filter bool and NO ScalpMode bool.
+RiskPerTradePct=1.0
+MaxDailyLossPct=4.0
+MaxPositions=2
+MaxTradesPerDay=10
+SL_ATR=1.2
+TP_ATR=1.5
+MinRR=1.0
+UseBE=true
+BE_TriggerATR=0.8
+UseTrail=true
+TrailStartATR=1.0
+TrailStepATR=0.3
+EnableDeltaBubble=true
+LondonStart=7
+LondonEnd=11
+NYStart=13
+NYEnd=17
+MagicNumber=334455
+CommentPrefix=SCALP

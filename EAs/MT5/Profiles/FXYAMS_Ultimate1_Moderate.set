@@ -1,0 +1,26 @@
+; FXYAMS_Ultimate1 Moderate — RiskPercent=0.5, Min_RR=1.2, EA defaults
+; Scope: XAU/XAG + EURUSD+ only, US30 out of scope. Sessions in PH (UTC+8), EA defaults:
+; London 15-00 PH (= 07-16 UTC) / NY 20-05 PH (covers 16-21 UTC)
+RiskPercent=0.5
+MaxDailyLossPct=5.0
+MaxPositions=2
+MaxDailyTrades=30
+MaxTPHits=8
+ResetOnNewSession=true
+Min_RR=1.2
+ScalpMode=true
+TrendMode=true
+UseSessionFilter=true
+SessionStartHour=15
+SessionStartMin=0
+SessionEndHour=0
+SessionEndMin=0
+Session2StartHour=20
+Session2StartMin=0
+Session2EndHour=5
+Session2EndMin=0
+UseTrailing=true
+UseBreakEven=true
+UsePartialTP=true
+MagicNumber=20260716
+CommentPrefix=ULTI_EA

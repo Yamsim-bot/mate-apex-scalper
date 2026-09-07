@@ -1,0 +1,8 @@
+# FXPair news blackout file — maintained remotely. Times in PH (UTC+8).
+# Rule: NO trades 30 min before high-impact news, resume 1 hour after.
+# Format: YYYY.MM.DD HH:MM-HH:MM CCY (CCY = USD/EUR/GBP/JPY/AUD/CAD/CHF/NZD or ALL)
+# US data 08:30 EST = 20:30 PH -> blackout 20:00-21:30.
+2026.09.10 20:00-21:30 USD
+2026.09.11 20:00-21:30 USD
+HOLIDAY:2026.12.25
+HOLIDAY:2027.01.01
