@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "YAMSTUNNA Trading Systems"
 #property link      ""
-#property version   "3.00"
+#property version   "3.10"
 #property strict
 
-#include "DeltaBubble.mqh"
+#include "SaneTrade.mqh"   // shared guards: movement, news, holiday, day locks, smart exit
 
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                   |
@@ -20,6 +20,19 @@ input int      MaxPositions       = 1;          // Max positions
 input int      MaxTradesPerDay    = 5;          // Max trades per day
 input int      MagicNumber        = 334455;     // Magic number
 input string   CommentPrefix      = "SCALP";    // Order comment
+
+//--- SaneTrade shared guards (movement, news, holiday, profit lock, direction, smart exit)
+input bool     SaneMovement        = true;       // Skip dead/flat market
+input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
+input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
+input double   SaneProfitLockPct   = 5.0;        // Halt new entries after +X% day
+input bool     SaneDirection       = true;       // Skip chop: require clear EMA50/200 separation
+input double   SaneTrendSepATR     = 0.30;       // Min separation (x M15 ATR)
+input bool     SaneSmartExit       = true;       // Euthanize bled-out + stale trades
+input double   SaneDeadExitATR     = 0.8;
+input double   SaneDeadExitMinH    = 2.0;
+input double   SaneMaxHoldHours    = 8.0;
 
 input string   Inp_TF             = "======== TIMEFRAMES ========";
 input ENUM_TIMEFRAMES EntryTF     = PERIOD_M5;  // Entry TF
@@ -82,9 +95,7 @@ struct Zone { double top; double bottom; double mid; double str; bool supply; bo
 Zone gSupply[], gDemand[];
 int gSupplyCnt, gDemandCnt;
 
-// Delta Bubble
-DeltaBubbleEngine *gDeltaEngine = NULL;
-DeltaBubbleData gDeltaData;
+// Delta Bubble REMOVED (engine file missing; entries run on VP + S/D + flow)
 string gDeltaDesc = "";
 
 //+------------------------------------------------------------------+
@@ -100,17 +111,9 @@ int OnInit()
    gSupplyCnt = 0;
    gDemandCnt = 0;
    
-   // Initialize Delta Bubble engine
-   if(EnableDeltaBubble)
-   {
-      gDeltaEngine = new DeltaBubbleEngine(Delta_MinBubble, Delta_AbsorbThresh, 
-                                            Delta_ShiftThresh, Delta_Lookback);
-      Print("Delta Bubble: ON minBubble=", Delta_MinBubble, 
-            " absorbThresh=", Delta_AbsorbThresh, 
-            " minStr=", Delta_MinStrength);
-   }
-   
-   Print("=== ScalpMaster Pro v3.0 | Magic:", MagicNumber, " ===");
+   // Delta engine removed — VP + S/D + flow only
+    
+   Print("=== ScalpMaster Pro v3.10 | Magic:", MagicNumber, " ===");
    return INIT_SUCCEEDED;
 }
 
@@ -119,7 +122,6 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   if(gDeltaEngine != NULL) delete gDeltaEngine;
    Comment("");
 }
 
@@ -180,7 +182,31 @@ bool CanTrade()
    
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    if(gDailyPnL <= -(bal * MaxDailyLossPct / 100.0)) return false;
-   
+
+   //--- SaneTrade day tracking (gDailyPnL never accumulates in this EA, so the
+   //    check above is dead code — track equity baseline instead; real halt + lock)
+   static int s_smpDay = 0;
+   static double s_smpStartEq = 0;
+   MqlDateTime sdt;
+   TimeCurrent(sdt);
+   int dayk = sdt.year * 10000 + sdt.mon * 100 + sdt.day;
+   if(dayk != s_smpDay) { s_smpDay = dayk; s_smpStartEq = AccountInfoDouble(ACCOUNT_EQUITY); }
+   if(s_smpStartEq > 0)
+   {
+      double eqNow = AccountInfoDouble(ACCOUNT_EQUITY);
+      double ddP = (s_smpStartEq - eqNow) / s_smpStartEq * 100.0;
+      if(ddP >= MaxDailyLossPct) return false;
+      double upP = (eqNow - s_smpStartEq) / s_smpStartEq * 100.0;
+      if(upP >= SaneProfitLockPct) return false;
+   }
+
+   //--- SaneTrade guards: holiday, news, dead market, chop
+   if(SaneHoliday && SANE_IsHoliday()) return false;
+   if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return false;
+   if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return false;
+   if(SaneDirection && !SANE_MASeparationOK(_Symbol, PERIOD_M15, 50, 200,
+                                            SANE_ATR(_Symbol, PERIOD_M15, 14), SaneTrendSepATR)) return false;
+
    return true;
 }
 
@@ -328,26 +354,10 @@ void CheckEntry()
    double buyP = 0, sellP = 0;
    GetFlow(buyP, sellP);
    
-   // Delta Bubble confluence
+   // Delta Bubble confluence REMOVED — VP + S/D + flow only
    bool deltaBuy = true, deltaSell = true;
    int deltaStr = 5;
    gDeltaDesc = "";
-   
-   if(EnableDeltaBubble && gDeltaEngine != NULL)
-   {
-      gDeltaData = gDeltaEngine.Calculate(_Symbol, EntryTF);
-      deltaBuy = gDeltaEngine.ConfirmsBuy(gDeltaData);
-      deltaSell = gDeltaEngine.ConfirmsSell(gDeltaData);
-      deltaStr = gDeltaEngine.GetBubbleStrength(gDeltaData);
-      gDeltaDesc = gDeltaEngine.GetDescription(gDeltaData);
-      
-      // If Delta Bubble enabled, require it for entry
-      if(deltaStr < Delta_MinStrength)
-      {
-         deltaBuy = false;
-         deltaSell = false;
-      }
-   }
    
    // BUY: at POC/VAL + demand zone + buy flow + delta confirm
    bool atPOC = MathAbs(price - gPOC) < tol;
@@ -589,6 +599,12 @@ double CalcLots(double slDist)
 //+------------------------------------------------------------------+
 void ManageOpen()
 {
+   //--- SaneTrade smart exit first (cut bleeders/stale before BE/trailing)
+   if(SaneSmartExit && gATR > 0)
+      SANE_SmartExit(_Symbol, (long)MagicNumber, gATR,
+                     SaneDeadExitATR, SaneDeadExitMinH, SaneMaxHoldHours,
+                     30, SANE_DetectFill(_Symbol), "SANE_EXIT");
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(PositionGetSymbol(i) != _Symbol) continue;
@@ -660,16 +676,6 @@ void ShowComment()
    if(gVPValid)
       c += StringFormat("VP: POC=%.2f VAH=%.2f VAL=%.2f\n", gPOC, gVAH, gVAL);
    c += StringFormat("S/D: %d supply, %d demand\n", gSupplyCnt, gDemandCnt);
-   
-   if(EnableDeltaBubble && gDeltaEngine != NULL)
-   {
-      c += StringFormat("Delta: %.0f | Ratio: %.2f | Bubbles: %d\n",
-                        gDeltaData.delta, gDeltaData.deltaRatio, gDeltaData.bubbleCount);
-      if(gDeltaData.absorption) c += ">> ABSORPTION DETECTED <<\n";
-      if(gDeltaData.deltaShift) c += ">> DELTA SHIFT <<\n";
-      if(gDeltaData.strongBuy) c += ">> STRONG BUY PRESSURE <<\n";
-      if(gDeltaData.strongSell) c += ">> STRONG SELL PRESSURE <<\n";
-   }
    
    Comment(c);
 }

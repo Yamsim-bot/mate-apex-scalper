@@ -126,4 +126,110 @@ int SANE_DayLock(double dayStartBal, double curBal, double lossPct, double lockP
    if(pct >= lockPct) return 1;
    return 0;
 }
+
+//--- Fresh ATR snapshot (self-contained handle, released immediately)
+double SANE_ATR(string sym, ENUM_TIMEFRAMES tf, int period)
+{
+   int h = iATR(sym, tf, period);
+   if(h == INVALID_HANDLE) return 0;
+   double b[];
+   ArraySetAsSeries(b, true);
+   double v = 0;
+   if(CopyBuffer(h, 0, 1, 1, b) > 0) v = b[0];
+   IndicatorRelease(h);
+   return v;
+}
+
+//--- Direction clarity: |fastMA-slowMA| must span minSep x ATR (else chop — no trade)
+bool SANE_MASeparationOK(string sym, ENUM_TIMEFRAMES tf, int fastP, int slowP, double atr, double minSep)
+{
+   if(atr <= 0) return false;
+   int hf = iMA(sym, tf, fastP, 0, MODE_EMA, PRICE_CLOSE);
+   int hs = iMA(sym, tf, slowP, 0, MODE_EMA, PRICE_CLOSE);
+   if(hf == INVALID_HANDLE || hs == INVALID_HANDLE)
+   {
+      if(hf != INVALID_HANDLE) IndicatorRelease(hf);
+      if(hs != INVALID_HANDLE) IndicatorRelease(hs);
+      return false;
+   }
+   double bf[], bs[];
+   ArraySetAsSeries(bf, true); ArraySetAsSeries(bs, true);
+   bool ok = false;
+   if(CopyBuffer(hf, 0, 1, 1, bf) > 0 && CopyBuffer(hs, 0, 1, 1, bs) > 0)
+      ok = (MathAbs(bf[0] - bs[0]) / atr >= minSep);
+   IndicatorRelease(hf); IndicatorRelease(hs);
+   return ok;
+}
+
+//--- Smart exit: euthanize bled-out (>deadATR after deadH) + stale (<=0 after maxH) trades
+int SANE_SmartExit(string sym, long magic, double atr, double deadATR, double deadH, double maxH,
+                   int slippage, ENUM_ORDER_TYPE_FILLING fill, string tag)
+{
+   if(atr <= 0) return 0;
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(pt <= 0) return 0;
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != sym) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != magic) continue;
+      long type = PositionGetInteger(POSITION_TYPE);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double px = (type == POSITION_TYPE_BUY ? SymbolInfoDouble(sym, SYMBOL_BID) : SymbolInfoDouble(sym, SYMBOL_ASK));
+      double ageH = (double)(TimeCurrent() - (datetime)PositionGetInteger(POSITION_TIME)) / 3600.0;
+      double ppts = (type == POSITION_TYPE_BUY ? (px - entry) : (entry - px)) / pt;
+      bool dead = (ppts < 0 && (-ppts * pt) / atr >= deadATR && ageH >= deadH);
+      bool stale = (ppts <= 0 && ageH >= maxH);
+      if(!dead && !stale) continue;
+      MqlTradeRequest r; ZeroMemory(r);
+      MqlTradeResult z; ZeroMemory(z);
+      r.action = TRADE_ACTION_DEAL; r.symbol = sym; r.volume = vol;
+      r.type = (type == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY);
+      r.price = px; r.position = ticket; r.deviation = slippage; r.magic = (ulong)magic;
+      r.comment = tag; r.type_filling = fill;
+      if(OrderSend(r, z) && z.retcode == TRADE_RETCODE_DONE)
+      {
+         closed++;
+         Print("SANE EXIT ", sym, " #", ticket, (dead ? " bled " : " stale "), DoubleToString(ageH, 1), "h");
+      }
+   }
+   return closed;
+}
+
+//--- Flatten: close ALL positions for (sym, magic) at market (day-trade flat, Friday-style)
+int SANE_FlattenAll(string sym, long magic, int slippage, ENUM_ORDER_TYPE_FILLING fill, string tag)
+{
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != sym) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != magic) continue;
+      long type = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double px = (type == POSITION_TYPE_BUY ? SymbolInfoDouble(sym, SYMBOL_BID) : SymbolInfoDouble(sym, SYMBOL_ASK));
+      MqlTradeRequest r; ZeroMemory(r);
+      MqlTradeResult z; ZeroMemory(z);
+      r.action = TRADE_ACTION_DEAL; r.symbol = sym; r.volume = vol;
+      r.type = (type == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY);
+      r.price = px; r.position = ticket; r.deviation = slippage; r.magic = (ulong)magic;
+      r.comment = tag; r.type_filling = fill;
+      if(OrderSend(r, z) && z.retcode == TRADE_RETCODE_DONE) closed++;
+   }
+   if(closed > 0) Print("SANE FLAT ", sym, " closed=", closed, " (", tag, ")");
+   return closed;
+}
+
+//--- Detect broker fill mode for a symbol
+ENUM_ORDER_TYPE_FILLING SANE_DetectFill(string sym)
+{
+   long f = SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+   if((f & SYMBOL_FILLING_FOK) != 0) return ORDER_FILLING_FOK;
+   if((f & SYMBOL_FILLING_IOC) != 0) return ORDER_FILLING_IOC;
+   return ORDER_FILLING_RETURN;
+}
 //+------------------------------------------------------------------+
