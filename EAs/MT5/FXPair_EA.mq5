@@ -42,7 +42,7 @@
 
 #property copyright "FXPair EA v2.0"
 
-#property version   "2.12"
+#property version   "2.15"
 
 #property description "Forex Confluence Day Trader — Multi-Symbol, Relaxed Filters"
 
@@ -52,6 +52,7 @@
 
 #include "PriceActionPatterns.mqh"
 #include "SupportResistance.mqh"
+#include "SaneTrade.mqh"   // shared: SANE_FlattenAll for day-trade flat (own copies kept for sessions/news)
 
 
 
@@ -115,7 +116,7 @@ input double   RSI_Sell_Min        = 20.0;         // RSI must be >= this for SE
 
 //--- Confluence
 
-input int      ConfluenceMinScore  = 3;            // Minimum confluence to enter (v2.11 tightened: was 1)
+input int      ConfluenceMinScore  = 4;            // Minimum confluence to enter (v2.14 ace-only: was 3)
 input int      MinConfluenceGap    = 2;            // Winner must beat loser by this margin (v2.11: kills coin-flip 3v2 entries)
 
 //--- v2.12 smart trading: pair sessions, movement, news/holiday, best-only, profit-first
@@ -129,7 +130,18 @@ input int      MinMovePoints       = 100;          // Min range of last closed M
 input bool     UseNewsFilter       = true;         // Blackout file: Files\FXPair_NewsBlackout.txt (maintained remotely)
 input bool     UseHolidayFilter    = true;         // Skip Dec 25 / Jan 1 + file-listed holidays
 input bool     TradeBestOnly       = true;         // ONE new trade per scan: top-scoring pair only
-input double   DailyProfitLockPct  = 1.5;          // Halt new entries after +X% day (lock gains)
+input bool     UseChopFilter       = true;         // Skip choppy/directionless market (EMA separation check)
+input double   TrendMinSepATR      = 0.30;         // Min |EMA50-EMA200| separation (x M15 ATR) for clear direction
+//--- v2.14 smart exit: euthanize bleeding/dead trades, only aces get fired
+input bool     UseSmartExit        = true;         // Close trades bleeding out or going nowhere
+input double   DeadExitATR         = 0.8;          // Close if this far ATR against us...
+input double   DeadExitMinH        = 2.0;          // ...after at least these hours
+input double   MaxHoldHours        = 8.0;          // Close flat/losing trades after these hours (winners run)
+input double   DailyProfitLockPct  = 5.0;          // Halt new entries after +X% day (target: 5% daily, DD max 2%)
+//--- v2.15 role: DAY TRADE — flat before NY close, never hold overnight
+input bool     DayTradeFlat        = true;         // Close all FXPair positions before NY close
+input int      FlatHourPH          = 4;            // Flat from this PH hour...
+input int      FlatMinPH           = 30;           // ...and minute (NY close 05:00 PH)
 
 input int      SwingLookback       = 2;            // Bars each side for swing detection
 
@@ -189,7 +201,7 @@ input double   Min_RR              = 1.5;          // Minimum reward:risk ratio 
 
 //--- Partial Take-Profit
 
-input bool     UsePartialTP        = false;        // Enable partial take profit
+input bool     UsePartialTP        = true;         // Enable partial take profit (profit-first: banks 50% at 75% of TP)
 
 input double   PartialTP_Pct       = 75.0;         // Partial TP at X% of full TP distance
 
@@ -608,7 +620,7 @@ int OnInit()
 
 {
 
-   Comment("FXPair EA v2.12\nMulti-Symbol Confluence Day Trader");
+   Comment("FXPair EA v2.15\nMulti-Symbol Confluence Day Trader");
 
    g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
@@ -814,7 +826,7 @@ int OnInit()
 
    Print("================================================================");
 
-   Print("FXPair EA v2.12 initialized (", g_symbolCount, " symbols)");
+   Print("FXPair EA v2.15 initialized (", g_symbolCount, " symbols)");
 
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
@@ -1028,6 +1040,23 @@ void OnTick()
 
    DetectTPHits();
 
+   //--- v2.15 day-trade role: flatten everything before NY close (no overnight holds)
+   if(DayTradeFlat)
+   {
+      MqlDateTime fdt;
+      TimeToStruct(TimeGMT() + 8 * 3600, fdt);
+      int fday = fdt.year * 10000 + fdt.mon * 100 + fdt.day;
+      static int s_flatDay = 0;
+      bool pastFlat = (fdt.hour > FlatHourPH || (fdt.hour == FlatHourPH && fdt.min >= FlatMinPH));
+      if(pastFlat && fdt.hour < 5 && s_flatDay != fday)
+      {
+         s_flatDay = fday;
+         for(int fs = 0; fs < g_symbolCount; fs++)
+            SANE_FlattenAll(g_states[fs].name, (long)MagicNumber, MaxSlippagePts,
+                            g_states[fs].fillMode, "DAYFLAT");
+      }
+   }
+
 
 
    //--- Heartbeat: log status once per hour (v2.10: was per-12-ticks = log spam)
@@ -1172,6 +1201,16 @@ void OnTick()
       double atrM15 = GetATR(st, TF_Structure);
 
       if(atrM5 <= 0 || atrM15 <= 0) continue;
+
+
+
+      //--- v2.13: skip chop — no clear EMA direction, no trade
+
+      if(UseChopFilter && !HasDirection(st, atrM15))
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: choppy (no EMA direction)");
+         continue;
+      }
 
 
 
@@ -1901,6 +1940,16 @@ double GetRSI(SymbolState &st)
 }
 
 
+
+//--- v2.13 chop filter: EMAs must show clear separation (direction), in M15 ATR units
+bool HasDirection(SymbolState &st, double atrM15)
+{
+   if(atrM15 <= 0) return false;
+   double ma50 = GetMA(st, 1);
+   double ma200 = GetMA(st, 2);
+   if(ma50 <= 0 || ma200 <= 0) return false;
+   return (MathAbs(ma50 - ma200) / atrM15 >= TrendMinSepATR);
+}
 
 double GetMA(SymbolState &st, int idx)
 
@@ -3088,9 +3137,42 @@ void ManageOpenPositions(SymbolState &st)
 
       double currentPrice = (type == POSITION_TYPE_BUY) ?
 
-                            SymbolInfoDouble(st.name, SYMBOL_BID) :
+                             SymbolInfoDouble(st.name, SYMBOL_BID) :
 
-                            SymbolInfoDouble(st.name, SYMBOL_ASK);
+                             SymbolInfoDouble(st.name, SYMBOL_ASK);
+
+
+
+      //--- v2.14 smart exit: cut bleeding-to-death and stale trades early
+
+      if(UseSmartExit)
+      {
+         datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
+         double ageH = (double)(TimeCurrent() - opened) / 3600.0;
+         double profitPts = (type == POSITION_TYPE_BUY ? (currentPrice - entry) : (entry - currentPrice)) / point;
+         double adverseATR = (profitPts < 0 ? (-profitPts * point) / atr : 0);
+         bool deadTrade = (profitPts < 0 && adverseATR >= DeadExitATR && ageH >= DeadExitMinH);
+         bool staleTrade = (profitPts <= 0 && ageH >= MaxHoldHours);
+         if(deadTrade || staleTrade)
+         {
+            MqlTradeRequest creq = {}; MqlTradeResult cres = {};
+            creq.action = TRADE_ACTION_DEAL;
+            creq.symbol = st.name;
+            creq.volume = volume;
+            creq.type = (type == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY);
+            creq.price = currentPrice;
+            creq.position = ticket;
+            creq.deviation = MaxSlippagePts;
+            creq.magic = MagicNumber;
+            creq.comment = "SMART_EXIT";
+            creq.type_filling = st.fillMode;
+            if(OrderSend(creq, cres) && cres.retcode == TRADE_RETCODE_DONE)
+               Print("FXPair SMART EXIT ", st.name, " #", ticket,
+                     (deadTrade ? " (bled " : " (stale "),
+                     DoubleToString(ageH, 1), "h)");
+            continue;
+         }
+      }
 
 
 
