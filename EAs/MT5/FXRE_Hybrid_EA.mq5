@@ -13,7 +13,7 @@
 //|  7. Auto-detect broker fill mode (was hardcoded IOC)              |
 //+------------------------------------------------------------------+
 #property copyright "FXRE Replication Project"
-#property version   "2.10"
+#property version   "3.00"
 #property description "FXRE Hybrid v2.01 Conservative: trend+reject filters, 0.8ATR proximity, RR>=1.5 net, no trail-into-loss"
 
 //--- Scalp Mode (v3.0)
@@ -38,11 +38,11 @@ input bool     UseTrendFilter        = true;
 input int      TrendFilterMAPeriod   = 200;   // EMA for trend direction
 
 //--- Risk Management
-input double   RiskPerTradePct       = 0.5;   // % risk per trade (was 1.0)
+input double   RiskPerTradePct       = 0.25;  // % risk per trade (conservative role: was 0.5)
 input double   SL_BufferATR          = 0.3;   // SL behind zone (x ATR, was 1.2)
 input double   TP_Multiplier         = 2.0;   // TP = zone_width * mult (was 2.0)
 input double   TP_MinATR             = 0.6;   // Min TP (x ATR, was 0.8)
-input double   Min_RR                = 1.5;   // Minimum reward:risk (anti-bleed: >= 1:1, TP is stretched to hold)
+input double   Min_RR                = 2.0;   // Minimum reward:risk (v3.0 rebuild: was 1.5 — only asymmetric payoffs)
 
 //--- Partial Take-Profit
 input bool     UsePartialTP          = true;   // Enable partial take profit
@@ -62,7 +62,7 @@ input double   BreakEven_ATR         = 0.8;    // Move SL after X*ATR profit
 input double   FixedLotPer2k         = 0.01;   // Fallback lot per $2k
 
 //--- Safety Limits
-input int      MaxPositions          = 2;      // Max positions
+input int      MaxPositions          = 1;      // Max positions (v3.0 rebuild: was 2 — one bullet at a time)
 input int      MaxDailyTrades        = 8;      // Max trades per day (10-15 for scalp)
 input double   MaxDailyLossPct       = 2.0;    // Stop trading at this loss % (profit-first: was 3.0)
 input int      MaxTPHits             = 5;      // Pause after X TPs hit PER SESSION
@@ -91,7 +91,16 @@ input bool     SaneMovement        = true;       // Skip dead/flat market
 input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
 input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
 input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
-input double   SaneProfitLockPct   = 1.5;        // Halt new entries after +X% day
+input double   SaneProfitLockPct   = 5.0;        // Halt new entries after +X% day
+input bool     SaneDirection       = true;       // Skip chop: require clear EMA50/200 separation
+input double   SaneTrendSepATR     = 0.30;       // Min separation (x M15 ATR)
+input bool     SaneSmartExit       = true;       // Euthanize bled-out + stale trades
+input double   SaneDeadExitATR     = 0.8;        // Close if this far ATR against us...
+input double   SaneDeadExitMinH    = 2.0;        // ...after at least these hours
+input bool     SaneMaxHoldHours      = 8.0;        // Close flat/losing trades after these hours
+//--- v3.0 rebuild: TREND-ONLY (the bleed was counter-trend zone fading)
+input bool     TrendOnly           = true;       // Buys only above EMA200 + separated trend; sells mirrored
+input double   TrendOnlyMinSep     = 0.50;       // Min |EMA50-EMA200| separation (x M15 ATR)
 
 //--- General
 input ulong    MagicNumber           = 20241201;
@@ -731,7 +740,7 @@ int OnInit()
                     (g_fillMode == ORDER_FILLING_IOC) ? "IOC" : "RETURN";
 
    Print("================================================================");
-   Print("FXRE Hybrid EA v2.1 initialized");
+   Print("FXRE Hybrid EA v3.00 initialized (TREND-ONLY rebuild)");
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    Print("  Account: ", AccountInfoInteger(ACCOUNT_LOGIN), " @ ", AccountInfoString(ACCOUNT_SERVER));
    Print("  Balance: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2));
@@ -886,6 +895,25 @@ void CheckHybridEntry()
       {
          trendBull = (ratesM5[0].close > ema200);
          trendBear = (ratesM5[0].close < ema200);
+      }
+   }
+
+   //--- v3.0 rebuild: TREND-ONLY — kill counter-trend zone fades (the bleed source)
+   if(TrendOnly)
+   {
+      double sepATR = SANE_ATR(_Symbol, PERIOD_M15, 14);
+      bool strongTrend = SANE_MASeparationOK(_Symbol, PERIOD_M15, 50, TrendFilterMAPeriod,
+                                             sepATR, TrendOnlyMinSep);
+      if(!strongTrend) { trendBull = false; trendBear = false; }
+      else
+      {
+         // buys need price above EMA200 with bull separation; sells mirrored
+         double e200 = CalcEMA(PERIOD_M15, TrendFilterMAPeriod);
+         if(e200 > 0)
+         {
+            if(!(ratesM5[0].close > e200)) trendBull = false;
+            if(!(ratesM5[0].close < e200)) trendBear = false;
+         }
       }
    }
 
@@ -1160,6 +1188,17 @@ void OnTick()
    { UpdateComment(); return; }
    if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts))
    { UpdateComment(); return; }
+
+   //--- Direction clarity: no chop trades
+   if(SaneDirection && !SANE_MASeparationOK(_Symbol, PERIOD_M15, 50, 200,
+                                            SANE_ATR(_Symbol, PERIOD_M15, 14), SaneTrendSepATR))
+   { UpdateComment(); return; }
+
+   //--- SaneTrade smart exit (runs every tick, winners untouched)
+   if(SaneSmartExit)
+      SANE_SmartExit(_Symbol, (long)MagicNumber, SANE_ATR(_Symbol, PERIOD_M15, 14),
+                     SaneDeadExitATR, SaneDeadExitMinH, SaneMaxHoldHours,
+                     MaxSlippagePts, g_fillMode, "SANE_EXIT");
 
    //--- Profit lock: halt new entries after locking gains
    double dayUp = (AccountInfoDouble(ACCOUNT_EQUITY) - g_hybridDaily.startingBalance)
