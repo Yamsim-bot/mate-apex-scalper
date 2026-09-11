@@ -85,3 +85,10 @@ python "C:\Users\Jamie\Documents\cTrader\scripts\send_ea_performance_tg.py"
 4. Verify inputs match `*_Conservative.set` (magic, risk %, session hours).
 5. Experts log must show `Risk: ... | Max DD: ...` init lines and no `TP PAUSE`
    anomalies; run `check_local_performance.py` next day to confirm new deals per magic.
+
+## EA ROLES (2026-09-07, no inter-competition)
+- ScalpXAU v3.31 = SCALP ONLY (M5/M15 gold, fast BE, MaxTradesPerSess 5). Risk 0.5%.
+- FXRE v2.11 = CONSERVATIVE (17-20 PH window, max 3/session, risk 0.25%).
+- FXYAMS v2.21 = SWING/DAY hybrid (structure scalp + TrendMode swing leg, wide trails). Risk 0.5%.
+- FXPair v2.15 = DAY TRADE forex Majors (flat 04:30 PH, never overnight). Risk 0.25%.
+- Common goal all EAs: +5% daily lock, 2% daily halt, news/holiday/movement/direction guards, smart exits.
