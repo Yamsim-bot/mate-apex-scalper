@@ -42,7 +42,7 @@
 
 #property copyright "FXPair EA v2.0"
 
-#property version   "2.15"
+#property version   "2.16"
 
 #property description "Forex Confluence Day Trader — Multi-Symbol, Relaxed Filters"
 
@@ -118,6 +118,8 @@ input double   RSI_Sell_Min        = 20.0;         // RSI must be >= this for SE
 
 input int      ConfluenceMinScore  = 4;            // Minimum confluence to enter (v2.14 ace-only: was 3)
 input int      MinConfluenceGap    = 2;            // Winner must beat loser by this margin (v2.11: kills coin-flip 3v2 entries)
+//--- v2.16 anti-churn: bench a pair after consecutive losses
+input int      PairMaxConsecLoss   = 2;            // Skip pair rest of day after N straight losing closes
 
 //--- v2.12 smart trading: pair sessions, movement, news/holiday, best-only, profit-first
 input bool     UsePairSessions     = true;         // Trade each pair only in its own window (PH time)
@@ -440,6 +442,29 @@ void MarkTPDealLogged(ulong ticket)
   }
 void ClearLoggedTPDeals() { ArrayResize(g_loggedTPTickets, 0); }
 
+//--- v2.16 per-pair loss-streak bench (stops churn on a cold pair)
+int      g_consecLoss[];
+ulong    g_countedCloseTickets[];
+bool IsCloseCounted(ulong ticket)
+{
+   for(int i = ArraySize(g_countedCloseTickets) - 1; i >= 0; i--)
+      if(g_countedCloseTickets[i] == ticket) return true;
+   return false;
+}
+void MarkCloseCounted(ulong ticket)
+{
+   int n = ArraySize(g_countedCloseTickets);
+   ArrayResize(g_countedCloseTickets, n + 1);
+   g_countedCloseTickets[n] = ticket;
+}
+void ClearCountedCloses() { ArrayResize(g_countedCloseTickets, 0); }
+int SymIndex(string sym)
+{
+   for(int i = 0; i < g_symbolCount; i++)
+      if(g_states[i].name == sym) return i;
+   return -1;
+}
+
 int      g_logFile = -1;
 
 int      g_heartbeatCount = 0;
@@ -620,7 +645,7 @@ int OnInit()
 
 {
 
-   Comment("FXPair EA v2.15\nMulti-Symbol Confluence Day Trader");
+   Comment("FXPair EA v2.16\nMulti-Symbol Confluence Day Trader");
 
    g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
@@ -724,6 +749,8 @@ int OnInit()
    //--- Trim whitespace and validate
 
    ArrayResize(g_states, g_symbolCount);
+   ArrayResize(g_consecLoss, g_symbolCount);
+   for(int zl0 = 0; zl0 < g_symbolCount; zl0++) g_consecLoss[zl0] = 0;
 
    for(int i = 0; i < g_symbolCount; i++)
 
@@ -826,7 +853,7 @@ int OnInit()
 
    Print("================================================================");
 
-   Print("FXPair EA v2.15 initialized (", g_symbolCount, " symbols)");
+   Print("FXPair EA v2.16 initialized (", g_symbolCount, " symbols)");
 
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
@@ -1143,6 +1170,13 @@ void OnTick()
       //--- Position/trade limits
 
       if(CountPositionsForSymbol(st.name) >= MaxPositionsPerPair) continue;
+
+      //--- v2.16 anti-churn: benched pair sits out the rest of the day
+      if(g_consecLoss[s] >= PairMaxConsecLoss)
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: benched after streak (", g_consecLoss[s], " losses)");
+         continue;
+      }
 
       if(CountAllPositions() >= MaxGlobalPositions) continue;
 
@@ -3480,6 +3514,10 @@ void CheckDailyReset()
 
       ClearLoggedTPDeals();   // fresh day -> fresh TP-deal set (counter reset)
 
+      ClearCountedCloses();   // v2.16 fresh day -> recount closes
+      ArrayResize(g_consecLoss, g_symbolCount);
+      for(int zl = 0; zl < g_symbolCount; zl++) g_consecLoss[zl] = 0;
+
    }
 
 
@@ -3601,6 +3639,28 @@ void DetectTPHits()
       if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
 
          g_lastTradeCloseTime = dealTime;
+
+      //--- v2.16 loss-streak bench: count each close once, track per-pair streak
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT && !IsCloseCounted(ticket))
+      {
+         MarkCloseCounted(ticket);
+         string csym = HistoryDealGetString(ticket, DEAL_SYMBOL);
+         int cidx = SymIndex(csym);
+         if(cidx >= 0)
+         {
+            double net = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                       + HistoryDealGetDouble(ticket, DEAL_COMMISSION)
+                       + HistoryDealGetDouble(ticket, DEAL_SWAP);
+            if(net < 0)
+            {
+               g_consecLoss[cidx]++;
+               if(g_consecLoss[cidx] == PairMaxConsecLoss)
+                  Print("FXPair BENCH ", csym, ": ", PairMaxConsecLoss, " straight losses — rested for today.");
+            }
+            else
+               g_consecLoss[cidx] = 0;
+         }
+      }
 
 
 
