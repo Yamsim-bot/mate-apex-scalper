@@ -13,7 +13,7 @@
 //| v2.10: TrendMode trend-following leg (pullback + breakout, no RSI)|
 //+------------------------------------------------------------------+
 #property copyright "FXYAMS Replication Project"
-#property version   "2.20"
+#property version   "2.21"
 #property description "FXYAMS_Ultimate1 v2.10: Structure scalper + TrendMode trend-following leg"
 
 #include "SaneTrade.mqh"   // shared guards: movement, news, holiday, day locks
@@ -90,9 +90,18 @@ input bool     TradeFriday         = true;
 //--- SaneTrade shared guards (movement, news, holiday, profit lock)
 input bool     SaneMovement        = true;       // Skip dead/flat market
 input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneVolume          = true;       // Require live tape (tick volume vs average)
+input double   SaneMinRelVol       = 0.8;        // Last M15 bar vol >= this x 20-bar avg
+input int      SaneVolLookback     = 20;
 input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
 input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
-input double   SaneProfitLockPct   = 1.5;        // Halt new entries after +X% day
+input double   SaneProfitLockPct   = 5.0;        // Halt new entries after +X% day
+input bool     SaneDirection       = true;       // Skip chop: require clear EMA50/200 separation
+input double   SaneTrendSepATR     = 0.30;       // Min separation (x M15 ATR)
+input bool     SaneSmartExit       = true;       // Euthanize bled-out + stale trades
+input double   SaneDeadExitATR     = 0.8;        // Close if this far ATR against us...
+input double   SaneDeadExitMinH    = 2.0;        // ...after at least these hours
+input double   SaneMaxHoldHours    = 8.0;        // Close flat/losing trades after these hours
 
 //--- Scalp Mode (v3.0)
 input bool     ScalpMode           = true;       // Enable scalp mode (relaxed filters)
@@ -307,7 +316,7 @@ int OnInit()
                     (g_fillMode == ORDER_FILLING_IOC) ? "IOC" : "RETURN";
 
    Print("================================================================");
-   Print("FXYAMS_Ultimate1 v2.1 initializing");
+   Print("FXYAMS_Ultimate1 v2.21 initializing (swing/day roles + sane guards)");
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    Print("  Account: ", AccountInfoInteger(ACCOUNT_LOGIN), " @ ", AccountInfoString(ACCOUNT_SERVER));
    Print("  Balance: $", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
@@ -472,6 +481,11 @@ bool CanTrade()
    if(SaneHoliday && SANE_IsHoliday()) return false;
    if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return false;
    if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return false;
+   if(SaneVolume && !SANE_RelVolumeOK(_Symbol, PERIOD_M15, SaneVolLookback, SaneMinRelVol)) return false;
+
+   //--- Direction clarity: no chop trades
+   if(SaneDirection && !SANE_MASeparationOK(_Symbol, PERIOD_M15, MA_Fast_Period, MA_Slow_Period,
+                                            SANE_ATR(_Symbol, PERIOD_M15, 14), SaneTrendSepATR)) return false;
 
    //--- Profit lock (mirror of loss halt, equity-based)
    double up = (AccountInfoDouble(ACCOUNT_EQUITY) - g_dailyStats.startingBalance)
@@ -1403,6 +1417,12 @@ void OnTick()
    //--- Manage open positions (ALWAYS — even on TP pause, so trailing/break-even
    //    keeps protecting open positions; the pause only gates new entries)
    ManageOpenPositions();
+
+   //--- SaneTrade smart exit: cut bleeders + stale trades
+   if(SaneSmartExit)
+      SANE_SmartExit(_Symbol, (long)MagicNumber, SANE_ATR(_Symbol, PERIOD_M15, 14),
+                     SaneDeadExitATR, SaneDeadExitMinH, SaneMaxHoldHours,
+                     MaxSlippagePts, g_fillMode, "SANE_EXIT");
 
    //--- TP pause: no new entries this session, but open positions stay managed
    if(g_dailyStats.tpPause)

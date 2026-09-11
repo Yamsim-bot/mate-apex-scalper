@@ -129,6 +129,9 @@ input int      Asia_SessionStart   = 6;            // JPY/AUD/NZD tradable from 
 input int      Asia_SessionEnd     = 2;            // ...to (PH)
 input bool     UseVolatilityFilter = true;         // Skip dead/flat market
 input int      MinMovePoints       = 100;          // Min range of last closed M15 bar (points)
+input bool     UseVolumeFilter     = true;         // Require live tape (tick volume vs average)
+input double   MinRelVolume        = 0.8;          // Last M15 bar vol >= this x 20-bar avg
+input int      VolLookback         = 20;
 input bool     UseNewsFilter       = true;         // Blackout file: Files\FXPair_NewsBlackout.txt (maintained remotely)
 input bool     UseHolidayFilter    = true;         // Skip Dec 25 / Jan 1 + file-listed holidays
 input bool     TradeBestOnly       = true;         // ONE new trade per scan: top-scoring pair only
@@ -1211,6 +1214,12 @@ void OnTick()
       if(UseVolatilityFilter && !HasMovement(st.name))
       {
          if(DebugMode) Print("FXPair ", st.name, " skip: no movement (flat market)");
+         continue;
+      }
+
+      if(UseVolumeFilter && !SANE_RelVolumeOK(st.name, PERIOD_M15, VolLookback, MinRelVolume))
+      {
+         if(DebugMode) Print("FXPair ", st.name, " skip: dead tape (no volume)");
          continue;
       }
 

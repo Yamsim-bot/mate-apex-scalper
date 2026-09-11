@@ -10,7 +10,7 @@
 //|  - ATR-based SL + TP with break-even + trailing                  |
 //+------------------------------------------------------------------+
 #property copyright "FXRE v3.0"
-#property version   "3.30"
+#property version   "3.31"
 #property description "XAUUSD FRVP + Price Action Scalper"
 #property description "v3.20: + VP-Pro Mode (Syndicate/Shadow Intel fusion):"
 #property description "  Weekly VP POC/VAH/VAL + Hard S/D zones + Order Flow confluence"
@@ -34,11 +34,20 @@
 input string   Inp_Gen            = "======== GENERAL ========";
 input double   RiskPerTradePct    = 0.5;
 input double   MaxDailyRiskPct    = 2.0;
-input double   SaneProfitLockPct   = 1.5;      // Halt new entries after +X% day (lock gains)
+input double   SaneProfitLockPct   = 5.0;      // Halt new entries after +X% day (lock gains)
 input bool     SaneMovement        = true;     // Skip dead/flat market
 input int      SaneMinMovePts      = 200;      // Min M15 bar range, points ($2 on gold)
+input bool     SaneVolume          = true;     // Require live tape (tick volume vs average)
+input double   SaneMinRelVol       = 0.8;
+input int      SaneVolLookback     = 20;
 input bool     SaneNews            = true;     // Blackout file (USD news moves gold)
 input bool     SaneHoliday         = true;     // Skip Dec 25 / Jan 1 + listed
+input bool     SaneDirection       = true;     // Skip chop: require clear EMA separation
+input double   SaneTrendSepATR     = 0.30;     // Min separation (x ATR)
+input bool     SaneSmartExit       = true;     // Euthanize bled-out + stale trades
+input double   SaneDeadExitATR     = 0.8;      // Close if this far ATR against us...
+input double   SaneDeadExitMinH    = 2.0;      // ...after at least these hours
+input double   SaneMaxHoldHours    = 8.0;      // Close flat/losing scalp after these hours
 input double   MaxSessDDPct       = 1.5;
 input int      MaxTradesPerSess   = 5;
 input int      MaxPositions       = 1;
@@ -265,7 +274,7 @@ int OnInit()
       Print("Broker GMT offset: AUTO = +", g_brokerGMTOffset);
    }
 
-   Print("ScalpXAU v3.0 initialized on ", _Symbol, " ", EnumToString(EntryTF));
+   Print("ScalpXAU v3.31 initialized on ", _Symbol, " ", EnumToString(EntryTF));
    Print("FRVP: anchors=", FRVP_Anchors, " bucket=", FRVP_BucketPips,
          " VA%=", FRVP_ValueAreaPct, " refresh every ", FRVP_RefreshBars, " bars");
    Print("PA: pin_wick=", PA_MinWickATR, "xATR wick/body>=", PA_WickBodyRatio,
@@ -443,6 +452,11 @@ void CheckEntry()
    if(SaneHoliday && SANE_IsHoliday()) return;
    if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return;
    if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return;
+   if(SaneVolume && !SANE_RelVolumeOK(_Symbol, PERIOD_M15, SaneVolLookback, SaneMinRelVol)) return;
+
+   //--- Direction clarity: no chop scalps
+   if(SaneDirection && !SANE_MASeparationOK(_Symbol, PERIOD_M15, Trend_MA_Fast, Trend_MA_Slow,
+                                            SANE_ATR(_Symbol, PERIOD_M15, 14), SaneTrendSepATR)) return;
 
    //--- Need FRVP valid for entries
    if(!g_frvp.current.valid)
@@ -1487,6 +1501,12 @@ void ManagePositions()
 {
    if(!UseBreakEven && !UseTrailing) return;
    if(g_atrValue <= 0) return;
+
+   //--- SaneTrade smart exit (scalp: cut losers fast, winners trail)
+   if(SaneSmartExit)
+      SANE_SmartExit(_Symbol, (long)MagicNumber, g_atrValue,
+                     SaneDeadExitATR, SaneDeadExitMinH, SaneMaxHoldHours,
+                     MaxSlippagePts, g_fillMode, "SANE_EXIT");
 
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);

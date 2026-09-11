@@ -224,6 +224,20 @@ int SANE_FlattenAll(string sym, long magic, int slippage, ENUM_ORDER_TYPE_FILLIN
    return closed;
 }
 
+//--- Volume: last closed bar tick-volume vs average (dead tape = no trade)
+bool SANE_RelVolumeOK(string sym, ENUM_TIMEFRAMES tf, int lookback, double minRel)
+{
+   if(lookback < 2) return true;
+   long vols[];
+   ArraySetAsSeries(vols, true);
+   if(CopyTickVolume(sym, tf, 1, lookback + 1, vols) < lookback + 1) return false;
+   double avg = 0;
+   for(int i = 1; i <= lookback; i++) avg += (double)vols[i];
+   avg /= (double)lookback;
+   if(avg <= 0) return false;
+   return ((double)vols[0] >= avg * minRel);
+}
+
 //--- Detect broker fill mode for a symbol
 ENUM_ORDER_TYPE_FILLING SANE_DetectFill(string sym)
 {

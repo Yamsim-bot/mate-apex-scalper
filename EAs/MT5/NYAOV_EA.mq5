@@ -7,7 +7,7 @@
 //| locks, smart exit. No martingale/grid/hedge — prop-firm clean.    |
 //+------------------------------------------------------------------+
 #property copyright "NY AOV port v1.0"
-#property version   "1.10"
+#property version   "1.20"
 #property description "XAUUSD NY 9:30 AOV breakout, one trade/day, RR 2.0"
 
 #include "SaneTrade.mqh"
@@ -37,6 +37,14 @@ input double   SaneMaxHoldHours    = 8.0;
 input bool     WeekendBlock        = true;         // No new entries Sat/Sun (NY calendar)
 input bool     FridayCutoff        = true;         // No new entries late Friday (avoid weekend gap risk)
 input int      FridayCutHourNY     = 15;           // Friday entries stop at this NY hour
+//--- Chop regime: no long-RR trades without volume + direction (scalp or skip)
+input bool     UseVolumeFilter     = true;         // Require live tape (tick volume vs average)
+input double   MinRelVolume        = 0.8;          // Last M15 bar vol >= this x 20-bar avg
+input int      VolLookback         = 20;
+input bool     UseDirectionFilter  = true;         // Require clear EMA50/200 separation
+input double   DirMinSepATR        = 0.30;         // Min separation (x M15 ATR)
+input bool     ChopAllowScalp      = false;        // Weak regime: scalp (RR 1.0, half risk) instead of skip
+input double   ScalpRR             = 1.0;          // Scalp fallback RR
 //--- General
 input ulong    MagicNumber         = 20260911;
 input string   CommentPrefix       = "NYAOV";
@@ -95,11 +103,11 @@ bool MarketOpenForEntries()
    return (mode == SYMBOL_TRADE_MODE_FULL);
 }
 
-double CalcLot(double slDist)
+double CalcLot(double slDist, double mult = 1.0)
 {
    if(slDist <= 0) return 0;
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskCash = bal * RiskPerTradePct / 100.0;
+   double riskCash = bal * RiskPerTradePct / 100.0 * mult;
    double tickV = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickS = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    if(tickV <= 0 || tickS <= 0) return 0;
@@ -124,7 +132,7 @@ int OnInit()
    NYTime(dk, hh, mm);
    g_dayKey = dk;
    g_dayStartBal = AccountInfoDouble(ACCOUNT_BALANCE);
-   Print("NYAOV v1.10 lockdown initialized on ", _Symbol, " ", EnumToString(EntryTF),
+   Print("NYAOV v1.20 lockdown initialized on ", _Symbol, " ", EnumToString(EntryTF),
          " | 9:30 NY = 21:30 PH (EDT) | RR=", RRTarget);
    return INIT_SUCCEEDED;
 }
@@ -171,12 +179,12 @@ void TryCloseFlat(string tag)
    }
 }
 
-bool SendEntry(bool isBuy, double sl, double tp)
+bool SendEntry(bool isBuy, double sl, double tp, double riskMult = 1.0)
 {
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double px = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double slDist = isBuy ? (px - sl) : (sl - px);
-   double lots = CalcLot(slDist);
+   double lots = CalcLot(slDist, riskMult);
    if(lots <= 0) return false;
    MqlTradeRequest r; ZeroMemory(r);
    MqlTradeResult z; ZeroMemory(z);
@@ -292,19 +300,37 @@ void OnTick()
    bool longOK = !UseEMAFilter || c1 > ema;
    bool shortOK = !UseEMAFilter || c1 < ema;
 
+   //--- Chop regime: no long-RR trades without volume + direction
+   bool volOK = !UseVolumeFilter || SANE_RelVolumeOK(_Symbol, PERIOD_M15, VolLookback, MinRelVolume);
+   double atr15 = SANE_ATR(_Symbol, PERIOD_M15, 14);
+   bool dirOK = !UseDirectionFilter || SANE_MASeparationOK(_Symbol, PERIOD_M15, 50, 200, atr15, DirMinSepATR);
+   double effRR = RRTarget;
+   double riskMult = 1.0;
+   if(!volOK || !dirOK)
+   {
+      if(!ChopAllowScalp)
+      {
+         if(DebugMode) Print("NYAOV skip: chop (volOK=", volOK, " dirOK=", dirOK, ") — no long-RR trade");
+         return;
+      }
+      effRR = ScalpRR;
+      riskMult = 0.5;
+      Print("NYAOV SCALP MODE (volOK=", volOK, " dirOK=", dirOK, ") RR=", effRR);
+   }
+
    //--- Breakout cross (Pine-faithful close-cross + buffer)
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    if(longOK && c1 > g_aovHigh + AOVBuffer && c2 <= g_aovHigh + AOVBuffer)
    {
       double sl = NormalizeDouble(g_aovLow - SLBuffer, dg);
-      double tp = NormalizeDouble(c1 + (c1 - sl) * RRTarget, dg);
-      if(SendEntry(true, sl, tp)) g_tradeToday = true;
+      double tp = NormalizeDouble(c1 + (c1 - sl) * effRR, dg);
+      if(SendEntry(true, sl, tp, riskMult)) g_tradeToday = true;
    }
    else if(shortOK && c1 < g_aovLow - AOVBuffer && c2 >= g_aovLow - AOVBuffer)
    {
       double sl = NormalizeDouble(g_aovHigh + SLBuffer, dg);
-      double tp = NormalizeDouble(c1 - (sl - c1) * RRTarget, dg);
-      if(SendEntry(false, sl, tp)) g_tradeToday = true;
+      double tp = NormalizeDouble(c1 - (sl - c1) * effRR, dg);
+      if(SendEntry(false, sl, tp, riskMult)) g_tradeToday = true;
    }
 }
 //+------------------------------------------------------------------+

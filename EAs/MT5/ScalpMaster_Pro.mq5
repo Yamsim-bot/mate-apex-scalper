@@ -24,6 +24,9 @@ input string   CommentPrefix      = "SCALP";    // Order comment
 //--- SaneTrade shared guards (movement, news, holiday, profit lock, direction, smart exit)
 input bool     SaneMovement        = true;       // Skip dead/flat market
 input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneVolume          = true;       // Require live tape (tick volume vs average)
+input double   SaneMinRelVol       = 0.8;
+input int      SaneVolLookback     = 20;
 input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
 input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
 input double   SaneProfitLockPct   = 5.0;        // Halt new entries after +X% day
@@ -204,6 +207,7 @@ bool CanTrade()
    if(SaneHoliday && SANE_IsHoliday()) return false;
    if(SaneNews && SANE_IsNewsBlocked(_Symbol)) return false;
    if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts)) return false;
+   if(SaneVolume && !SANE_RelVolumeOK(_Symbol, PERIOD_M15, SaneVolLookback, SaneMinRelVol)) return false;
    if(SaneDirection && !SANE_MASeparationOK(_Symbol, PERIOD_M15, 50, 200,
                                             SANE_ATR(_Symbol, PERIOD_M15, 14), SaneTrendSepATR)) return false;
 

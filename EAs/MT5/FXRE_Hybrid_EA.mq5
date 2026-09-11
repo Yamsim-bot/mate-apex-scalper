@@ -89,6 +89,9 @@ input bool     TradeFriday           = true;
 //--- SaneTrade shared guards (movement, news, holiday, profit lock)
 input bool     SaneMovement        = true;       // Skip dead/flat market
 input int      SaneMinMovePts      = 200;        // Min M15 bar range, points ($2 on gold)
+input bool     SaneVolume          = true;       // Require live tape (tick volume vs average)
+input double   SaneMinRelVol       = 0.8;
+input int      SaneVolLookback     = 20;
 input bool     SaneNews            = true;       // Blackout file (USD news moves gold)
 input bool     SaneHoliday         = true;       // Skip Dec 25 / Jan 1 + listed
 input double   SaneProfitLockPct   = 5.0;        // Halt new entries after +X% day
@@ -1187,6 +1190,8 @@ void OnTick()
    if(SaneNews && SANE_IsNewsBlocked(_Symbol))
    { UpdateComment(); return; }
    if(SaneMovement && !SANE_HasMovement(_Symbol, PERIOD_M15, SaneMinMovePts))
+   { UpdateComment(); return; }
+   if(SaneVolume && !SANE_RelVolumeOK(_Symbol, PERIOD_M15, SaneVolLookback, SaneMinRelVol))
    { UpdateComment(); return; }
 
    //--- Direction clarity: no chop trades
