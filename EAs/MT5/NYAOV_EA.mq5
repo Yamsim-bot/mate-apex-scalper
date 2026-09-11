@@ -33,6 +33,10 @@ input bool     SaneSmartExit       = true;
 input double   SaneDeadExitATR     = 0.8;
 input double   SaneDeadExitMinH    = 2.0;
 input double   SaneMaxHoldHours    = 8.0;
+//--- Friday/weekend lockdown (never trade closed markets or weekends)
+input bool     WeekendBlock        = true;         // No new entries Sat/Sun (NY calendar)
+input bool     FridayCutoff        = true;         // No new entries late Friday (avoid weekend gap risk)
+input int      FridayCutHourNY     = 15;           // Friday entries stop at this NY hour
 //--- General
 input ulong    MagicNumber         = 20260911;
 input string   CommentPrefix       = "NYAOV";
@@ -71,6 +75,24 @@ void NYTime(int &dayKey, int &hh, int &mm)
    TimeToStruct(TimeGMT() + NYOffsetHours() * 3600, d);
    dayKey = d.year * 10000 + d.mon * 100 + d.day;
    hh = d.hour; mm = d.min;
+}
+
+int NYDow()
+{
+   MqlDateTime d;
+   TimeToStruct(TimeGMT() + NYOffsetHours() * 3600, d);
+   return d.day_of_week; // 0=Sun .. 6=Sat
+}
+
+bool MarketOpenForEntries()
+{
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) return false;
+   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) return false;
+   ResetLastError();
+   long mode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(GetLastError() != 0) return false;
+   return (mode == SYMBOL_TRADE_MODE_FULL);
 }
 
 double CalcLot(double slDist)
@@ -212,6 +234,22 @@ void OnTick()
    if(hh == 16 && mm == 0) TryCloseFlat("NYCLOSE");
 
    if(g_paused || g_tradeToday || HasOpen()) return;
+
+   //--- Weekend lockdown: never fire entries Sat/Sun (NY calendar)
+   int dow = NYDow();
+   if(WeekendBlock && (dow == 0 || dow == 6))
+   {
+      if(DebugMode) Print("NYAOV skip: weekend (no entries)");
+      return;
+   }
+   //--- Friday cutoff: no late entries into weekend gap risk
+   if(FridayCutoff && dow == 5 && hh >= FridayCutHourNY)
+   {
+      if(DebugMode) Print("NYAOV skip: Friday cutoff");
+      return;
+   }
+   //--- Market actually open for trading?
+   if(!MarketOpenForEntries()) return;
 
    //--- New bar only (close-cross entries like Pine)
    datetime bt = iTime(_Symbol, EntryTF, 0);
