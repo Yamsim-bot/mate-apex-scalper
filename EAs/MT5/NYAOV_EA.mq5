@@ -7,7 +7,7 @@
 //| locks, smart exit. No martingale/grid/hedge — prop-firm clean.    |
 //+------------------------------------------------------------------+
 #property copyright "NY AOV port v1.0"
-#property version   "1.00"
+#property version   "1.10"
 #property description "XAUUSD NY 9:30 AOV breakout, one trade/day, RR 2.0"
 
 #include "SaneTrade.mqh"
@@ -124,7 +124,7 @@ int OnInit()
    NYTime(dk, hh, mm);
    g_dayKey = dk;
    g_dayStartBal = AccountInfoDouble(ACCOUNT_BALANCE);
-   Print("NYAOV v1.00 initialized on ", _Symbol, " ", EnumToString(EntryTF),
+   Print("NYAOV v1.10 lockdown initialized on ", _Symbol, " ", EnumToString(EntryTF),
          " | 9:30 NY = 21:30 PH (EDT) | RR=", RRTarget);
    return INIT_SUCCEEDED;
 }
