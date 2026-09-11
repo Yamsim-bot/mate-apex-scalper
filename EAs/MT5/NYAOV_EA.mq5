@@ -19,7 +19,7 @@ input double   SLBuffer            = 3.00;       // SL buffer beyond opposite ed
 input bool     UseEMAFilter        = true;       // Require close on correct side of EMA200
 input int      EMAPeriod           = 200;        // EMA period (entry TF)
 //--- Risk
-input double   RiskPerTradePct     = 0.5;        // % risk per trade (fleet standard)
+input double   RiskPerTradePct     = 1.0;        // % risk per trade (per user: 1% for AOV breakout)
 input double   RRTarget            = 2.0;        // Risk:reward target
 input double   MaxDailyLossPct     = 2.0;        // Halt new entries at this daily loss %
 input int      MaxSlippagePts      = 50;
