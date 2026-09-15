@@ -42,7 +42,7 @@
 
 #property copyright "FXPair EA v2.0"
 
-#property version   "2.16"
+#property version   "2.17"
 
 #property description "Forex Confluence Day Trader — Multi-Symbol, Relaxed Filters"
 
@@ -116,7 +116,7 @@ input double   RSI_Sell_Min        = 20.0;         // RSI must be >= this for SE
 
 //--- Confluence
 
-input int      ConfluenceMinScore  = 4;            // Minimum confluence to enter (v2.14 ace-only: was 3)
+input int      ConfluenceMinScore  = 5;            // Minimum confluence to enter (v2.17 tighten: was 4 — Sep07-14 fwd: WR 43.7% @ RR 0.5)
 input int      MinConfluenceGap    = 2;            // Winner must beat loser by this margin (v2.11: kills coin-flip 3v2 entries)
 //--- v2.16 anti-churn: bench a pair after consecutive losses
 input int      PairMaxConsecLoss   = 2;            // Skip pair rest of day after N straight losing closes
@@ -184,7 +184,7 @@ input double   EngulfBodyATR_Min   = 0.15;         // Min engulfing body (xATR)
 
 //--- Risk Management
 
-input double   RiskPerTradePct     = 0.25;         // % risk per trade (v2.11 trimmed: was 0.5)
+input double   RiskPerTradePct     = 0.15;         // % risk per trade (v2.17 tighten: was 0.25 — cuts bleed/trade ~40%)
 
 input double   SL_ATR_Mult         = 0.6;          // SL buffer (x ATR)
 
@@ -244,7 +244,7 @@ input int      MaxPositionsPerPair = 2;            // Max positions per symbol (
 
 input int      MaxGlobalPositions  = 6;            // Max total open positions (was 4)
 
-input int      MaxDailyTrades      = 30;           // Max trades per day (all symbols) (was 20)
+input int      MaxDailyTrades      = 12;           // Max trades per day (all symbols) (v2.17 tighten: was 30 — Sep08 printed 37)
 
 input double   MaxDailyLossPct     = 2.0;          // Stop trading at this daily loss % (v2.12 profit-first: was 5.0)
 
@@ -648,7 +648,7 @@ int OnInit()
 
 {
 
-   Comment("FXPair EA v2.16\nMulti-Symbol Confluence Day Trader");
+   Comment("FXPair EA v2.17\nMulti-Symbol Confluence Day Trader");
 
    g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
 
@@ -856,7 +856,7 @@ int OnInit()
 
    Print("================================================================");
 
-   Print("FXPair EA v2.16 initialized (", g_symbolCount, " symbols)");
+   Print("FXPair EA v2.17 initialized (", g_symbolCount, " symbols)");
 
    Print("  Time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
